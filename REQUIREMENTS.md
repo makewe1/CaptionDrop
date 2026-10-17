@@ -1,452 +1,244 @@
 # CaptionDrop — Version 1 Requirements
 
-## Document status
+## Status and purpose
 
-Requirements discussion is in progress. This file records the agreed project
-boundary and the requirements discussed so far. Update it as decisions are made.
-Implementation has not started; creating this document does not authorize
-building the extension yet.
+The user authorized implementation of this specification. Version 0.1.2 implements
+local-file subtitles with a simple, elegant interface. This file records the
+required behavior, project boundary, and practical defaults chosen for this build.
+Verification details and installation instructions are in `README.md`.
 
-The confirmed direction is local-file subtitles, video detection across websites,
-and a basic, fast, stable, light extension. The user has also confirmed the file
-loading flow: select a detected video, click it to open a file browser, and choose
-the local subtitle file for that video. A small CaptionDrop button near the
-video's existing controls at the bottom of the player is also confirmed. The
-user has confirmed caption text size, text color, and background color controls,
-plus repositioning subtitles by dragging them with the mouse, and explicitly
-excluded manual subtitle timing adjustment. Remembering subtitles and loading
-them automatically on a return visit is also confirmed; whether memory applies
-to an individual video or the whole website is still being clarified. Other
-detailed behaviors and acceptance scenarios below are a draft baseline for
-review; they have not all been individually approved. The remaining functional
-requirements still need their details settled. Open decisions below are not
-additional approved features.
+CaptionDrop's priorities are **fast, stable, and light**. It runs locally without
+an account, backend, subtitle upload, or external runtime dependencies.
 
-The visual direction is confirmed: a simple, elegant interface, with the familiar
-feel of YouTube's caption controls and the restrained appearance of Apple design.
-The exact visual design remains to be decided.
+## Version 1 boundary
 
-# Purpose
+- Desktop Google Chrome 120 or newer; Manifest V3.
+- One selected video and one subtitle file at a time in each browser tab.
+- Standard HTML5 videos across websites, including dynamically loaded videos,
+  accessible embedded frames, and open shadow-root players.
+- YouTube and Bilibili have video identity and control-bar adapters. Their live
+  websites are compatibility targets; support must be tested before it is claimed.
+- Local SubRip (`.srt`) files only: UTF-8 or BOM-marked UTF-16, at most 2 MiB and
+  20,000 non-empty cues.
+- Initial detection follows a click on the toolbar icon. Automatic restoration
+  runs on sites where the user has enabled automatic loading and granted access.
+- Caption text size, text color, background color, and position are customizable.
+- Caption timing follows video playback automatically; no manual timing controls.
+- Interface: compact, clear, and elegant, with YouTube-like control familiarity
+  and an Apple-inspired, restrained visual direction.
 
-CaptionDrop is a Chrome extension that lets a user display their own subtitle file
-over an online video. Version 1 should provide the basic experience and be fast,
-stable, and light.
+## Main user flow
 
-## Version 1 scope baseline
-
-- Browser: desktop Google Chrome.
-- Subtitle source: a local file supplied by the user.
-- Initial subtitle format: SubRip (`.srt`).
-- One selected video and one loaded subtitle file at a time.
-- Video compatibility: standard HTML5 video that Chrome allows the extension to
-  access, across websites rather than a fixed list of supported sites.
-- Initial compatibility test targets include YouTube and Bilibili. Support must
-  be verified before it is claimed.
-- On first use, activate detection when the user clicks CaptionDrop.
-- On a return visit to a remembered target, restore saved subtitles automatically
-  where Chrome grants access. This is an exception to initial manual activation.
-  Avoid continuous scanning of unrelated browsing activity.
-- Subtitle processing stays in the browser; no account or server is needed.
-- Remember subtitle data locally so the user need not choose the file again on a
-  matching return visit. The website-versus-video matching rule remains open.
-- Caption appearance controls: text size, text color, and caption background color.
-- Caption positioning: move the subtitle block within the selected video by
-  dragging it with the mouse.
-- Subtitles follow the video's playback clock automatically. Manual timing
-  adjustment is outside version 1.
-- Interface style: simple, compact, and elegant, with clear controls and minimal
-  visual clutter.
-
-## Confirmed user flow — Select a video and choose subtitles
-
-1. Activate CaptionDrop on a page containing videos.
-2. CaptionDrop detects the accessible videos and makes them selectable.
-3. Click the video to receive subtitles in CaptionDrop's selection interface.
-4. A file browser opens so the user can navigate to their local subtitle file.
-5. Choose an `.srt` file and confirm the selection.
-6. CaptionDrop loads that file for the selected video and displays its subtitles
-   according to the video's playback time.
-7. A small CaptionDrop button is available near the selected video's existing
-   controls at the bottom of the player. Its click action remains to be decided.
-8. The user can drag the displayed subtitles with the mouse to change their
-   position within the video.
-
-Use the system's standard file selection dialog. The exact presentation of
-detected videos, such as a list or highlights on the page, remains to be decided.
-
-On a matching return visit, CaptionDrop restores the remembered subtitles once
-the target video is available, without requiring another extension click or file
-selection. Matching details are covered by FR-09 and remain to be decided.
+1. Open a webpage with a video and click CaptionDrop in Chrome's toolbar.
+2. See the detected videos and select one.
+3. Clicking a video entry immediately opens the system file browser.
+4. Navigate to a local `.srt` file and select it.
+5. Captions appear on the selected video at the video's current playback time.
+6. Use the small CaptionDrop button near the player's bottom controls to change
+   appearance, visibility, or the loaded file.
+7. Drag the subtitle block to move it within the video.
+8. Enable automatic loading for the website once. On a matching return visit,
+   saved subtitles are restored without choosing the file or clicking CaptionDrop.
 
 ## Functional requirements
 
 ### FR-01 — Detect videos across websites
 
-Status: the cross-website detection goal and ability to select a detected video
-are confirmed. Other detailed behavior and the technical compatibility boundary
-below are proposed for review.
+- Detect accessible HTML5 videos without limiting the extension to one website.
+- Include videos that appear later or replace a player while the page is active.
+- Discover accessible embedded videos and videos inside open shadow roots.
+- Present multiple detected videos so the user can choose the intended target.
+- Show a useful no-video or access-unavailable message and a scan-again action.
+- Preserve the website's playback state and position while detecting videos.
+- Handle navigation within a single-page website and stop displaying captions
+  when the active video's identity no longer matches its saved subtitle association.
 
-When the user activates CaptionDrop, or returns to a remembered target under
-FR-09, it must find accessible videos on the current webpage without depending on
-the page being a particular website.
-
-Proposed required behavior:
-
-1. Detect standard HTML5 videos already present on the page.
-2. Detect videos that appear after initial page loading while CaptionDrop is
-   active, including replacement videos during navigation within a site.
-3. Detect videos in embedded players where Chrome grants the required access.
-4. If multiple videos are available, let the user choose which receives subtitles.
-5. If no accessible video is found, display a clear message and provide a way to
-   scan again.
-6. Detection and selection must preserve the video's playback state and position.
-
-Acceptance scenarios:
-
-| Scenario                                            | Expected result                                                                       |
-| --------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| Page contains one accessible HTML5 video            | CaptionDrop finds it and makes it available for subtitle attachment.                  |
-| Page contains multiple accessible videos            | The user can choose the target video.                                                 |
-| Video appears after activation                      | CaptionDrop detects it while active.                                                  |
-| Site replaces its player without a full page reload | CaptionDrop discovers the replacement without attaching subtitles to the wrong video. |
-| Video is inside an accessible embedded frame        | CaptionDrop finds the embedded video.                                                 |
-| No accessible video is available                    | CaptionDrop shows a useful message and a scan-again action.                           |
-| Detection runs while a video is playing or paused   | Playback state and position remain unchanged.                                         |
-
-Compatibility boundary:
-
-- "Across websites" means support for accessible HTML5 video, not a guarantee
-  that every player on every website works.
-- Browser-restricted pages and frames without permission are outside the
-  accessible-video boundary. Communicate when access is unavailable.
-- Unusual or inaccessible players may require later integration work.
-- The permission model for embedded frames still needs to be decided.
+Acceptance: verify single, multiple, late-loaded, replaced, embedded, and absent
+videos; detection must not pause, restart, or seek the video.
 
 ### FR-02 — Select a video and load a local subtitle file
 
-Status: selecting a detected video and clicking it to open a file browser for the
-local subtitle file is confirmed. Recovery behavior below is proposed.
+- Use a selectable list of detected videos in the toolbar popup.
+- Clicking a video entry opens the system file browser directly.
+- Read and validate the selected SRT locally; attach it only to the chosen video.
+- Cancelling selection leaves the existing captions unchanged.
+- Invalid or unreadable replacements show a useful message and retain existing
+  captions. A missing target permits selecting a video again.
+- Enforce the encoding, file size, and cue count limits above.
 
-Required interaction:
-
-- Make the detected videos selectable so the user can choose the intended target.
-- Clicking a detected video in the selection interface opens the system's file
-  browser. The user can navigate folders and choose a local `.srt` file.
-- Read and process the chosen file locally, then attach its subtitles only to the
-  selected video.
-- Preserve the video's playback state and position during this flow.
-
-Proposed recovery behavior:
-
-- Cancelling the file dialog leaves any currently loaded subtitles unchanged.
-- Invalid or unreadable files produce a clear message and allow the user to try
-  another file without losing any currently loaded subtitles.
-- If the selected video disappears before loading finishes, explain that it is
-  unavailable and let the user select a video again.
-
-Acceptance scenarios:
-
-| Scenario                                                 | Expected result                                                               |
-| -------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| User clicks a detected video in CaptionDrop              | A local file selection dialog opens for that target video.                    |
-| User navigates folders and selects a valid `.srt` file | CaptionDrop loads the subtitles for the selected video.                       |
-| Several videos are present                               | Only the video the user selected receives the chosen subtitles.               |
-| User cancels file selection                              | No subtitle file is loaded or replaced.                                       |
-| User selects an invalid or unreadable file               | A clear error and retry path are available; existing subtitles remain usable. |
-| Selected video disappears before the file is attached    | CaptionDrop reports the unavailable target and allows video selection again.  |
-
-Open details: how detected videos are presented, supported file encodings, and
-file size limits.
+Acceptance: verify the real file chooser, cancellation, Unicode, multiline text,
+malformed files, oversized files, replacement, and correct video selection.
 
 ### FR-03 — Display subtitles in sync with playback
 
-- Show the subtitle text belonging to the selected video's current playback time.
-- Keep timing correct through play, pause, seeking, and playback speed changes.
-- Show no subtitle when there is no active subtitle cue.
-- Detailed subtitle parsing and overlapping-cue behavior remain to be decided.
+- Use the video's current playback time to select the active subtitle cues.
+- Remain synchronized through playing, pausing, seeking, and speed changes.
+- Display overlapping cues together and no text during gaps between cues.
+- Render subtitle contents as plain text, including multiline and right-to-left
+  text; embedded file markup must not execute as HTML.
+- Do not add manual time shifting, offset, delay, or individual cue editing.
+
+Acceptance: verify cue boundaries, overlaps, gaps, forward and backward seeking,
+pausing, and different playback speeds.
 
 ### FR-04 — Customize caption appearance
 
-Status: caption text size, text color, and background color controls are confirmed.
-Manual subtitle timing adjustment is excluded from version 1.
+- Provide controls for text size, text color, and caption background color.
+- Apply changes immediately to CaptionDrop's subtitle block without reloading the
+  file, seeking, pausing playback, or changing synchronization.
+- Retain the selected appearance when changing cues and entering fullscreen.
 
-Required controls:
+Build defaults: 28 px white text on a black caption background; text size range
+16–64 px; standard color pickers; settings remembered per video.
 
-- Let the user choose the caption text size.
-- Let the user choose the caption text color.
-- Let the user choose the caption background color.
-- Apply the chosen appearance to CaptionDrop's subtitles on the selected video.
+### FR-05 — Keep subtitles readable in normal view and fullscreen
 
-Proposed behavior and acceptance scenarios:
+- Start with a readable appearance and a bottom-center position inside the video.
+- Respect user-selected appearance and dragged position.
+- Keep the subtitle block inside the visible video bounds when resized.
+- In player-container fullscreen, retain the overlay, dragging, and settings.
+- In native fullscreen directly on a `<video>`, render captions using a native
+  subtitle track. Exit that mode to drag captions or access CaptionDrop settings.
+- Do not replace or remove the website's existing subtitle tracks.
 
-| Scenario                                  | Expected result                                                                          |
-| ----------------------------------------- | ---------------------------------------------------------------------------------------- |
-| User changes the caption size             | Displayed caption text updates to the chosen size without reloading the file.            |
-| User changes the caption text color       | CaptionDrop's subtitle text uses the chosen color.                                       |
-| User changes the caption background color | The background behind CaptionDrop's subtitle text uses the chosen color.                 |
-| User changes appearance during playback   | Playback state, playback position, and automatic subtitle synchronization are preserved. |
-| User enters supported fullscreen playback | The chosen appearance is retained in fullscreen.                                         |
+Acceptance: test normal view, resizing, player-container fullscreen, native video
+fullscreen, repeated fullscreen entry, and cleanup after leaving fullscreen.
 
-Open details: default appearance, supported size range and units, color selection
-controls, and whether appearance settings persist between videos or sessions.
+### FR-06 — Control loaded subtitles
 
-### FR-05 — Keep subtitles readable
+- Let the user show or hide captions and replace the subtitle file.
+- Preserve playback state and position when changing these controls.
+- Keep the player's CaptionDrop control available when captions are hidden.
+- Remember subtitle contents and settings as described in FR-09.
 
-- Use a readable default subtitle appearance.
-- Display subtitles in normal view and supported fullscreen video playback.
-- Honor the text size, text color, and background color selected through FR-04.
-- Honor the subtitle position chosen by mouse dragging through FR-08.
-- Default appearance, default caption placement, and fullscreen compatibility
-  details remain to be decided and tested.
-- Appearance customization beyond the three controls in FR-04 and mouse
-  positioning in FR-08 is outside version 1.
+### FR-07 — Provide a CaptionDrop button in the player
 
-### FR-06 — Control the loaded subtitles
+- Add a small, identifiable CaptionDrop icon button near the bottom playback
+  controls of the selected video.
+- Place it alongside available YouTube/Bilibili controls; use an overlay fallback
+  near the control area for other players.
+- Clicking it opens a compact panel with file selection/replacement, caption
+  visibility, text size, text color, background color, and forget-memory actions.
+- Keep existing player controls usable; avoid duplicate CaptionDrop buttons.
+- Support keyboard activation, clear labels, and visible focus.
+- Keep the button available after manual loading or automatic restoration.
 
-- Let the user turn subtitles off.
-- Let the user replace the current subtitle file.
-- Do not interrupt video playback when doing either action.
-- Remember subtitles for automatic restoration under FR-09. Whether appearance,
-  position, and the on/off setting are also remembered remains to be decided.
+Acceptance: verify button placement, repeated activation, panel controls, keyboard
+interaction, player-container fullscreen, and no interference with playback.
 
-### FR-07 — Provide a CaptionDrop button in the video player
+### FR-08 — Reposition subtitles by mouse dragging
 
-Status: a small icon button at the bottom of the video, near the player's existing
-controls, is confirmed. Its click action, exact appearance, and detailed behavior
-remain to be decided.
+- Press and hold on the subtitle block, drag horizontally or vertically, and
+  release to choose its position within the selected video.
+- Move text and background as one block.
+- Carry the chosen position over to subsequent cues.
+- Preserve playback and synchronization; prevent the drag from triggering the
+  website's click-to-pause or seeking behavior.
+- Maintain relative position when the player resizes or uses container fullscreen.
+- Keep captions within the visible video area.
 
-Required placement:
+Build default: persist relative position per video. Arrow keys also move a focused
+caption block. Dragging applies to the DOM overlay; native video fullscreen uses
+the browser's subtitle renderer as described in FR-05.
 
-- Provide an identifiable CaptionDrop icon button on the selected video player.
-- Position it near the original playback controls along the bottom of the video,
-  using YouTube's player controls as an example of the intended location.
-- Keep the original controls usable and avoid covering captions or other buttons.
-- Make the button available after manual activation for the selected video or
-  automatic restoration for a remembered target under FR-09.
+### FR-09 — Remember and automatically restore subtitles
 
-Proposed behavior for review:
+- Save subtitle contents locally so future visits do not depend on reopening the
+  original file or remembering its filesystem path.
+- Restore captions automatically when a saved target becomes available, provided
+  the user has granted site access and enabled automatic loading for that site.
+- Restore without opening the file browser or changing video playback position.
+- Apply saved captions only to their matching video, including after site navigation.
+- Let the user replace or forget the saved association. Forgetting does not remove
+  captions already loaded for the current visit.
+- If saving fails, keep loaded captions usable and explain that memory is unavailable.
 
-- Clicking the button opens a small CaptionDrop panel for the existing version 1
-  subtitle actions: choose or replace a file, turn subtitles on or off, and change
-  caption text size, text color, and background color. A file selection action in
-  that panel opens the system file browser. The panel has no manual subtitle
-  timing adjustment controls.
-- Keep the button usable in normal view and supported fullscreen playback.
-- Where the player hides its controls, show and hide the button with those
-  controls.
-- Support keyboard activation and provide an accessible "CaptionDrop" label.
-- Add only one button for the selected player, including after repeated activation.
+Build decisions:
 
-Proposed acceptance scenarios:
+- Memory is per individual video, rather than reusing one file across a domain.
+- YouTube uses the video ID; Bilibili separates video IDs, multipart selections,
+  and episode IDs. Generic sites use normalized page/source identity and player
+  ordinal, with the top page included for embedded players.
+- Persist subtitle contents, text size, colors, relative position, and visibility.
+  Do not save or restore video playback position.
+- Keep at most 50 saved videos and approximately 8 MiB of caption data. Remove
+  the oldest saved entries when the memory budget is exceeded.
+- Normal-window memory stays in browser-local extension storage. Incognito memory
+  uses separate session storage and is cleared after the last private window closes.
+- Automatic loading uses optional per-site access and persisted script registration.
+  Cross-origin embedded players may require their own site-access grant.
 
-| Scenario                                               | Expected result                                                          |
-| ------------------------------------------------------ | ------------------------------------------------------------------------ |
-| User selects a video in CaptionDrop                    | One CaptionDrop button is available near the bottom player controls.     |
-| Selected video uses YouTube's player                   | The button sits near the existing controls and does not obstruct them.   |
-| User uses the original player controls                 | Playback, volume, seeking, settings, and fullscreen controls still work. |
-| User enters supported fullscreen playback              | The CaptionDrop button remains accessible.                               |
-| CaptionDrop is activated repeatedly for the same video | The player still has only one CaptionDrop button.                        |
-
-Open details: button artwork, precise placement for each player, click action,
-panel layout if a panel is chosen, and fallback placement for players without an
-accessible bottom control bar. Substital is an interaction reference; the exact
-CaptionDrop design has not been chosen. Follow the visual direction in NFR-05.
-
-### FR-08 — Reposition subtitles by dragging with the mouse
-
-Status: changing the subtitle position by mouse dragging is confirmed. YouTube's
-draggable captions are an interaction reference. Detailed behavior below is
-proposed for review.
-
-Required interaction:
-
-- Let the user press and hold the mouse on CaptionDrop's displayed subtitle
-  block, drag it horizontally or vertically, and release it at a chosen position
-  within the selected video.
-- Move the subtitle block as a whole, including its text and background.
-
-Proposed behavior and acceptance scenarios:
-
-| Scenario                                                   | Expected result                                                                   |
-| ---------------------------------------------------------- | --------------------------------------------------------------------------------- |
-| User drags the displayed subtitle block                    | The block follows the pointer and stays at the chosen position on release.        |
-| The next subtitle cue appears                              | It uses the chosen position rather than returning to the default location.        |
-| User drags while the video is playing or paused            | Playback state, playback position, and subtitle synchronization are preserved.    |
-| User drags toward the edge of the video                    | The subtitle block stays within the visible video bounds.                         |
-| Video size changes or the user enters supported fullscreen | The chosen relative position is maintained, with the block kept inside the video. |
-| User interacts with the original player controls           | Dragging support does not obstruct those controls.                                |
-
-Open details: drag feedback, default position, whether a reset-position action is
-needed, and behavior when changing videos or reloading. Remembering positions
-across sessions has not been agreed.
-
-### FR-09 — Remember subtitles and restore them on return visits
-
-Status: remembering captions and automatically loading them when revisiting the
-site is confirmed. The matching rule and storage details remain open.
-
-Required behavior:
-
-- Remember the subtitles previously loaded by the user locally in the browser.
-- On a matching return visit, load the remembered subtitles automatically when
-  the target video becomes available and Chrome permits access.
-- Do not require the user to select the same file again or click the extension
-  again for a matching return visit.
-- Keep restoration local; no account, server, or subtitle upload is needed.
-- Preserve the video's playback state and position during restoration.
-
-Matching decision pending:
-
-- Recommended: remember each individual video separately, so different videos
-  on the same website can use different subtitle files.
-- Alternative: reuse the website's last subtitle file across the whole site.
-- The user has been asked which behavior they want. Neither matching rule is
-  confirmed yet; the implementation must not assume one is approved.
-
-Proposed storage and recovery behavior:
-
-- Save subtitle contents locally so restoration does not depend only on the
-  original file's name or path.
-- Keep remembered subtitles across browser restarts.
-- Provide a way to replace or forget a remembered subtitle association.
-- If saved data is unavailable, unreadable, or cannot be stored, explain the
-  issue and allow the user to choose a subtitle file manually.
-- Restore only when the current target matches the agreed rule. Handle sites
-  that change videos without a full page reload using the same matching rule.
-
-Proposed acceptance scenarios:
-
-| Scenario | Expected result |
-| --- | --- |
-| User revisits a remembered target under the agreed matching rule | Captions load automatically without reopening the file browser. |
-| The matching video appears after the page initially loads | Restoration happens once the video is available. |
-| User visits a target that does not match saved memory | CaptionDrop does not apply an unrelated saved subtitle file. |
-| User returns after restarting Chrome | The remembered association and subtitle contents remain available. |
-| User replaces a remembered subtitle file | Future matching visits use the replacement file. |
-| Restoration cannot access saved data or the target video | CaptionDrop explains the issue and provides a manual recovery path. |
-
-Open details: website-versus-video matching, identifying a target reliably,
-retention and storage limits, a forget-memory action, and site access needed for
-automatic restoration. Remembering appearance, dragged position, caption on/off
-state, or video playback position is not confirmed by this requirement.
+Acceptance: test restoration after reload and browser restart, delayed video
+loading, separate video identities, SPA navigation, cache limits, forgetting,
+permission revocation, and private-session separation.
 
 ## Non-functional requirements
 
 ### NFR-01 — Fast
 
-- Activation, video detection, subtitle loading, and restoration should feel
-  responsive.
-- Keep captions aligned with the video's playback clock.
-- Avoid unnecessary repeated processing or expensive work during playback.
-- Numeric timing targets, representative subtitle sizes, and test hardware still
-  need to be agreed; no performance results have been established yet.
+- Keep activation, scanning, loading, appearance changes, and restoration responsive.
+- Use indexed cue lookup and the video playback clock.
+- Avoid rereading subtitle files or rebuilding the cue index during playback.
+- Avoid a caption animation loop while the video is paused or captions are hidden.
 
 ### NFR-02 — Stable
 
-- Handle missing videos, invalid files, and changing players gracefully.
-- Preserve playback state and avoid interfering with the webpage's controls.
-- Repeated activation or file replacement must not create duplicate subtitle
-  displays or leave obsolete video attachments active.
-- Give the user a useful recovery action when an operation fails.
-- Test actual behavior on YouTube, Bilibili, and representative HTML5 video pages.
+- Handle missing/replaced players, invalid files, inaccessible frames, and memory
+  failures without interrupting the website.
+- Prevent duplicate overlays, buttons, native fallback cues, and stale attachments.
+- Clean up listeners, timers, observers, and native fallback cues on detachment.
+- Preserve the selected-video reservation across background service-worker restarts.
+- Use useful status messages and manual recovery paths.
 
 ### NFR-03 — Light
 
-- Proposed implementation approach: plain JavaScript, HTML, and CSS.
-- Avoid large frameworks and unnecessary dependencies.
-- Keep background activity and idle resource use minimal.
-- Keep automatic restoration checks limited to remembered targets and avoid
-  repeatedly loading saved subtitle contents when they are not needed.
-- Release resources associated with videos or subtitles that are no longer active.
-- Package size, CPU, and memory budgets still need to be agreed and measured.
+- Use plain JavaScript, HTML, and CSS with no runtime framework or external service.
+- Run no continuous all-website scanner before activation or site permission.
+- Limit automatic restoration to explicitly enabled sites.
+- Avoid full-page rescans for unrelated page mutations and bound saved-caption data.
+- Package only the extension runtime files and icons; exclude tests and tooling.
+- Measure package size and representative parser performance. No universal CPU,
+  memory, or startup-time claim is made without an agreed test environment.
 
 ### NFR-04 — Local processing
 
-- Keep subtitle file contents in the browser; do not upload them.
-- Keep remembered subtitle data in browser-local extension storage.
-- Require no account, backend, or external subtitle service for the core features.
-- Request browser permissions needed for the agreed behavior. The exact
-  permission design remains open.
+- Keep subtitles and saved data in the browser; no uploads or analytics.
+- Use the minimum required extension APIs plus optional website permissions for
+  automatic restoration and otherwise inaccessible embedded players.
+- Explain site access and remembering behavior in concise usage instructions.
 
 ### NFR-05 — Simple, elegant interface
 
-Status: a simple and elegant design inspired by YouTube's caption interface and
-Apple's design style is confirmed. Detailed styling and layout below are proposed.
-
-Design requirements:
-
-- Keep the extension interface compact, easy to understand, and visually quiet.
-- Use familiar video-player controls and concise labels for the agreed features.
-- Make the CaptionDrop player button fit naturally beside the existing controls.
-- Keep the video and captions visible while users interact with the controls.
-- Preserve readable text and identifiable, usable controls.
-- Keep visual effects and interface assets consistent with the fast and light
-  requirements; no heavy design framework is needed.
-
-Proposed visual approach:
-
-- A small, clearly organized panel for the main subtitle actions and appearance
-  controls, if the panel interaction proposed in FR-07 is chosen.
-- Readable system typography, consistent spacing, and a clear visual hierarchy.
-- A restrained neutral palette, subtle rounded corners, and simple icons.
-- Clear hover, selected, and keyboard-focus states.
-- Restrained shadows and transitions where they help explain an interaction.
-
-This requirement governs the extension's interface. Users still control their
-caption text size, text color, background color, and position through FR-04 and
-FR-08.
-
-Open details: exact palette, spacing, icon artwork, panel layout, and final visual
-review. Automatic light/dark themes or a theme switcher have not been requested.
+- Keep the interface compact and understandable, with familiar caption controls.
+- Use a simple, original taichi-inspired icon: one solid monochrome flowing
+  shape, with no badge, border, dots, or interior details. Use the same silhouette
+  in the player's control color for the in-player button.
+- Use system typography, consistent spacing, restrained colors, simple icons,
+  subtle rounded corners, and clear hover/focus/selected states.
+- Use one compact settings panel instead of adding complex screens.
+- Keep the video and captions as the main focus.
+- Avoid decorative effects or dependencies that undermine speed or package size.
+- Interface styling must not override the user's caption appearance preferences.
 
 ## Outside version 1
 
-- Online subtitle search or downloads.
-- Automatic captions, speech recognition, or AI transcription.
-- Translation.
-- Editing subtitle text or individual cue timings.
-- Manual subtitle timing adjustment, including offset or delay controls.
-- Appearance customization beyond caption text size, text color, background
-  color, and mouse positioning, such as font family selection or custom layouts
-  beyond moving the subtitle block.
-- Simultaneous subtitle tracks or subtitles on multiple videos at once.
-- Guaranteed compatibility with every website or custom video player.
-- Additional subtitle formats, including `.vtt`, unless explicitly added later.
+- Online subtitle search/download, automatic transcription, and translation.
+- Subtitle text editing, individual cue editing, and manual timing adjustments.
+- Additional subtitle formats, including VTT.
+- Multiple simultaneous subtitle tracks or captioned videos within one tab.
+- Font-family selection and layout customization beyond size, colors, and dragging.
+- Universal support for every website, closed shadow trees, browser-restricted
+  pages, non-HTML5 players, or picture-in-picture overlays.
+- Cloud accounts, servers, synchronization across devices, and saving playback position.
 
-## Decisions to settle before implementation
+## Completion and remaining verification
 
-1. Supported file encodings and sizes. The file-browser interaction is confirmed.
-2. Presentation of detected videos for selection and permission handling for
-   embedded players. Clicking a selection must open the file browser.
-3. Subtitle parsing details, including multiline text and overlapping cues.
-4. Caption size range and units, defaults, and text and background color controls.
-5. Default caption position, drag interaction details, and fullscreen behavior.
-   Mouse dragging to change the position is confirmed.
-6. Memory matching rule: remember each individual video or reuse a file across
-   the whole website. Also settle identification during navigation and reloads.
-7. Measurable performance and resource budgets and the test environment.
-8. Player button appearance and exact placement, what clicking it opens, and
-   placement on players without accessible bottom controls.
-9. Memory storage and retention limits, forgetting or replacing saved captions,
-   and browser permissions needed for automatic restoration.
-10. Whether appearance settings, dragged position, or caption on/off state are
-    remembered in addition to subtitle contents.
-11. Final interface layout and visual details within the simple, elegant direction
-    confirmed in NFR-05.
+The build should provide an unpacked Chrome extension and a runtime-only ZIP,
+with installation instructions, meaningful automated tests, and documented limits.
+Tests must cover parser safety, cue timing, memory, permissions, and actual browser
+interaction with generated local video fixtures. Live YouTube/Bilibili streaming
+compatibility must be reported separately from fixture and identity-rule tests.
 
-## Proposed version 1 completion criteria
-
-- The open decisions required to implement the agreed features have been resolved
-  in this document.
-- All nine functional requirements work within the documented compatibility
-  boundary.
-- Detection and subtitle playback have been verified on the agreed test pages,
-  including YouTube and Bilibili; any remaining limitations are documented.
-- Agreed performance and resource budgets have been measured and met.
-- The interface follows NFR-05 and has been visually reviewed for clarity,
-  readability, and fit beside the original video-player controls.
-- Invalid files, unavailable video access, and video replacement have been tested.
-- Automatic restoration has been verified against the agreed matching rule and
-  storage behavior, including delayed video loading and navigation between videos.
-- The user can load the unpacked extension in Chrome and follow concise usage
-  instructions.
+Additional manual compatibility checks on real sites and platforms may still be
+needed after automated verification. Record actual results without treating
+untested scenarios as confirmed support.

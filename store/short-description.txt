@@ -1,0 +1,1 @@
+Load local SRT subtitles onto supported online videos. Adjust their appearance and position, and remember captions per video.

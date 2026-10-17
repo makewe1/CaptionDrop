@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>CaptionDrop test player</title>
+<style>
+  * { box-sizing: border-box; }
+  body { background: #f4f4f6; color: #24252b; font: 16px system-ui,sans-serif; margin: 0; padding: 32px; }
+  main { max-width: 960px; margin: auto; }
+  h1 { font-size: 24px; margin: 0 0 8px; }
+  p { color: #626470; line-height: 1.5; }
+  .player { position: relative; width: 720px; max-width: 100%; margin: 20px 0; background: #121a29; border-radius: 8px; overflow: hidden; }
+  video { display: block; width: 100%; aspect-ratio: 16/9; }
+  .player:fullscreen { width: 100vw; height: 100vh; display: grid; place-items: center; border-radius: 0; }
+  .player:fullscreen video { width: 100%; max-height: 100vh; }
+  button { border: 1px solid #d8d9df; background: white; border-radius: 7px; padding: 9px 14px; margin-right: 8px; cursor: pointer; }
+  iframe { width: 740px; height: 560px; border: 1px solid #dadbe1; }
+</style>
+<main>
+  <h1>CaptionDrop test player</h1>
+  <p>A local HTML5 video fixture. Use demo.srt to verify captions without external sites.</p>
+  <div class="player" id="player"><video id="primary" aria-label="Primary demo video" controls muted playsinline preload="auto"></video></div>
+  <button id="fullscreen">Player fullscreen</button><button id="add-video">Add a video</button>
+  <div id="extras"></div>
+</main>
+<script src="/fixture.js"></script>
+</html>

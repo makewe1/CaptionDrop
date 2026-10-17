@@ -1,0 +1,24 @@
+Your video. Your subtitles.
+
+CaptionDrop lets you add your own SRT subtitle files to supported online videos. Select a detected video, choose a subtitle file from your computer, and keep the focus on what you are watching.
+
+MAKE CAPTIONS EASY TO READ
+- Choose the text size, text color, and background color.
+- Drag subtitles to your preferred position within the video.
+- Show or hide captions, or replace the subtitle file from the player controls.
+
+FOLLOW YOUR PLAYBACK
+Captions stay synchronized when you play, pause, seek, or change playback speed. Subtitle timing comes from your SRT file.
+
+PICK UP WHERE YOU LEFT OFF
+CaptionDrop remembers subtitle files for individual videos on your device. Enable automatic loading for a website to restore saved captions when you revisit the same video. Your chosen appearance and position are remembered too. You can forget saved subtitles from the player settings.
+
+KEEP YOUR FILES LOCAL
+No account is required, and your subtitle files are not uploaded. CaptionDrop processes and stores your captions locally in your browser. You choose which websites receive access for automatic loading.
+
+GET STARTED
+1. Open a webpage with a video and click CaptionDrop.
+2. Select the video and choose your local .srt file.
+3. Use the CaptionDrop button on the player to adjust your captions.
+
+CaptionDrop supports accessible HTML5 video players. Compatibility varies by website; some embedded, custom, or browser-restricted players may not be accessible. This version loads existing SRT files and does not generate or translate captions.
