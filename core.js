@@ -9,7 +9,7 @@
   const MAX_FILE_BYTES = 2 * 1024 * 1024;
   const MAX_CUES = 20000;
   const DEFAULT_STYLE = Object.freeze({
-    size: 28, color: '#ffffff', background: '#000000', x: 0.5, y: 0.86,
+    size: 28, color: '#ffffff', background: 'transparent', x: 0.5, y: 0.86,
   });
   const ENTITIES = Object.freeze({
     amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: '\u00a0',
@@ -157,7 +157,7 @@
     return {
       size: bounded(input.size, DEFAULT_STYLE.size, 16, 64),
       color: normalizeColor(input.color, DEFAULT_STYLE.color),
-      background: normalizeColor(input.background, DEFAULT_STYLE.background),
+      background: ['#000000', 'transparent'].includes(input.background) ? input.background : DEFAULT_STYLE.background,
       x: bounded(input.x, DEFAULT_STYLE.x, 0.05, 0.95),
       y: bounded(input.y, DEFAULT_STYLE.y, 0.05, 0.95),
     };

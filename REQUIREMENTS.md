@@ -22,7 +22,7 @@ an account, backend, subtitle upload, or external runtime dependencies.
   20,000 non-empty cues.
 - Initial detection follows a click on the toolbar icon. Automatic restoration
   runs on sites where the user has enabled automatic loading and granted access.
-- Caption text size, text color, background color, and position are customizable.
+- Caption text size, text color, background (Black or Transparent), and position are customizable.
 - Caption timing follows video playback automatically; no manual timing controls.
 - Interface: compact, clear, and elegant, with YouTube-like control familiarity
   and an Apple-inspired, restrained visual direction.
@@ -83,13 +83,15 @@ pausing, and different playback speeds.
 
 ### FR-04 — Customize caption appearance
 
-- Provide controls for text size, text color, and caption background color.
+- Provide controls for text size, text color, and caption background with exactly
+  two options: Black and Transparent.
 - Apply changes immediately to CaptionDrop's subtitle block without reloading the
   file, seeking, pausing playback, or changing synchronization.
 - Retain the selected appearance when changing cues and entering fullscreen.
 
-Build defaults: 28 px white text on a black caption background; text size range
-16–64 px; standard color pickers; settings remembered per video.
+Build defaults: 28 px white text on a transparent caption background; text size range
+16–64 px; a standard text color picker and Black/Transparent background selector;
+settings remembered per video. Previously saved custom backgrounds fall back to Transparent.
 
 ### FR-05 — Keep subtitles readable in normal view and fullscreen
 
@@ -118,7 +120,7 @@ fullscreen, repeated fullscreen entry, and cleanup after leaving fullscreen.
 - Place it alongside available YouTube/Bilibili controls; use an overlay fallback
   near the control area for other players.
 - Clicking it opens a compact panel with file selection/replacement, caption
-  visibility, text size, text color, background color, and forget-memory actions.
+  visibility, text size, text color, background (Black or Transparent), and forget-memory actions.
 - Keep existing player controls usable; avoid duplicate CaptionDrop buttons.
 - Support keyboard activation, clear labels, and visible focus.
 - Keep the button available after manual loading or automatic restoration.

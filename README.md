@@ -22,7 +22,8 @@ into a Windows folder and load that folder in Chrome.
 2. Select a detected video. The system file browser opens immediately.
 3. Choose your `.srt` subtitle file.
 4. Use the small **CaptionDrop** button near the video's controls to change text
-   size, text color, background color, or caption visibility, or choose a new file.
+   size, text color, background (Black or Transparent; Transparent by default),
+   or caption visibility, or choose a new file.
 5. Drag the caption block to move it. The position carries over to the next cue.
    Focused captions can also be moved with the arrow keys.
 

@@ -284,10 +284,10 @@
   const STYLES = `
     :host{all:initial;display:block;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:#f5f5f7;line-height:1.4;color-scheme:dark;direction:ltr}
     *,*::before,*::after{box-sizing:border-box}
-    button,input{font:inherit}button{cursor:pointer}button:focus-visible,input:focus-visible,.caption:focus-visible{outline:2px solid #90bfff;outline-offset:3px}
+    button,input,select{font:inherit}button{cursor:pointer}button:focus-visible,input:focus-visible,select:focus-visible,.caption:focus-visible{outline:2px solid #90bfff;outline-offset:3px}
     [hidden]{display:none!important}
     .surface{position:absolute;inset:0;pointer-events:none}
-    .caption{position:absolute;left:50%;top:86%;transform:translate(-50%,-50%);width:max-content;max-width:calc(100% - 20px);max-height:100%;overflow:hidden;white-space:pre-wrap;overflow-wrap:anywhere;text-align:center;font-family:Arial,"Noto Sans",sans-serif;font-size:28px;font-weight:600;line-height:1.3;color:#fff;background:#000;padding:3px 9px;border-radius:4px;pointer-events:auto;cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none;text-shadow:none;unicode-bidi:plaintext}
+    .caption{position:absolute;left:50%;top:86%;transform:translate(-50%,-50%);width:max-content;max-width:calc(100% - 20px);max-height:100%;overflow:hidden;white-space:pre-wrap;overflow-wrap:anywhere;text-align:center;font-family:Arial,"Noto Sans",sans-serif;font-size:28px;font-weight:600;line-height:1.3;color:#fff;background:transparent;padding:3px 9px;border-radius:4px;pointer-events:auto;cursor:grab;touch-action:none;user-select:none;-webkit-user-select:none;text-shadow:none;unicode-bidi:plaintext}
     .caption.dragging{cursor:grabbing;outline:1px solid rgba(255,255,255,.5)}
     .trigger{position:absolute;bottom:12px;right:54px;pointer-events:auto;width:36px;height:32px;display:grid;place-items:center;padding:0;color:white;background:rgba(20,20,22,.8);border:1px solid rgba(255,255,255,.2);border-radius:7px;opacity:.8;transition:opacity .12s}
     .surface.native-controls .trigger{bottom:56px;right:14px}
@@ -303,6 +303,7 @@
     .toggle{appearance:none;-webkit-appearance:none;position:relative;margin:0;width:32px;height:19px;border-radius:20px;background:#53545c;border:0;cursor:pointer;transition:background .12s}.toggle::after{content:"";position:absolute;left:3px;top:3px;width:13px;height:13px;background:#fff;border-radius:50%;transition:transform .12s}.toggle:checked{background:#5e8ff3}.toggle:checked::after{transform:translateX(13px)}
     .size{width:100%;height:20px;margin:3px 0 9px;accent-color:#a5bff7;cursor:pointer}
     input[type=color]{appearance:none;-webkit-appearance:none;width:32px;height:24px;border:1px solid #666874;border-radius:5px;padding:2px;background:transparent;cursor:pointer}input[type=color]::-webkit-color-swatch-wrapper{padding:0}input[type=color]::-webkit-color-swatch{border:0;border-radius:2px}
+    .background{max-width:140px;min-height:28px;border:1px solid #666874;border-radius:5px;padding:3px 7px;color:#f5f5f7;background:#25262c;cursor:pointer}
     .hint{color:#9b9da7;font-size:11px;margin:10px 0 0}.status{font-size:11px;color:#a9abb3;margin:12px 0 0;overflow-wrap:anywhere}.status.error{color:#ffc99f}
     .forget{display:block;border:0;background:transparent;color:#b7b9c4;padding:0;margin-top:12px;font-size:11px;text-decoration:underline;text-underline-offset:3px}.forget:hover{color:white}
     @media(prefers-reduced-motion:reduce){*{transition:none!important}}
@@ -375,10 +376,15 @@
     color.type = 'color'; color.id = 'text-color';
     textRow.append(textLabel, color);
     const backgroundRow = make('div', 'row');
-    const backgroundLabel = make('label', '', 'Background color');
+    const backgroundLabel = make('label', '', 'Background');
     backgroundLabel.htmlFor = 'background-color';
-    const background = make('input');
-    background.type = 'color'; background.id = 'background-color';
+    const background = make('select', 'background');
+    background.id = 'background-color';
+    for (const [value, label] of [['#000000', 'Black'], ['transparent', 'Transparent']]) {
+      const option = make('option', '', label);
+      option.value = value;
+      background.append(option);
+    }
     backgroundRow.append(backgroundLabel, background);
     const hint = make('p', 'hint', 'Drag captions to place them anywhere on the video.');
     const status = make('p', 'status', 'Loaded for this visit.');
@@ -447,7 +453,8 @@
       applyAppearance(state);
       queueSave(state);
     };
-    for (const control of [size, color, background]) listen(control, 'input', applySettings);
+    for (const control of [size, color]) listen(control, 'input', applySettings);
+    listen(background, 'change', applySettings);
     listen(forget, 'click', async () => {
       forget.disabled = true;
       const result = await send({ type: 'CD_FORGET', identity: state.identity });

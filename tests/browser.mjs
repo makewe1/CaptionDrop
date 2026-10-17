@@ -295,13 +295,22 @@ try {
     assert.equal(await page.locator('#primary').evaluate(video => video.playbackRate), 2);
   });
 
-  await check('Caption controls change size, text color and background locally', async () => {
+  await check('Caption controls offer only Black and Transparent backgrounds and apply both locally', async () => {
     await host().locator('.trigger').click();
+    const background = host().locator('#background-color');
+    assert.deepEqual(await background.locator('option').evaluateAll(options => options.map(option => ({ label: option.textContent, value: option.value }))), [
+      { label: 'Black', value: '#000000' },
+      { label: 'Transparent', value: 'transparent' },
+    ]);
+    assert.equal(await background.inputValue(), 'transparent');
+    assert.equal(await caption().evaluate(element => getComputedStyle(element).backgroundColor), 'rgba(0, 0, 0, 0)');
     await host().locator('#font-size').evaluate(input => { input.value = '36'; input.dispatchEvent(new Event('input', { bubbles: true })); });
     await host().locator('#text-color').evaluate(input => { input.value = '#ffe088'; input.dispatchEvent(new Event('input', { bubbles: true })); });
-    await host().locator('#background-color').evaluate(input => { input.value = '#17243a'; input.dispatchEvent(new Event('input', { bubbles: true })); });
+    await background.selectOption('#000000');
+    assert.equal(await caption().evaluate(element => getComputedStyle(element).backgroundColor), 'rgb(0, 0, 0)');
+    await background.selectOption('transparent');
     const style = await caption().evaluate(element => ({ size: getComputedStyle(element).fontSize, color: getComputedStyle(element).color, background: getComputedStyle(element).backgroundColor }));
-    assert.deepEqual(style, { size: '36px', color: 'rgb(255, 224, 136)', background: 'rgb(23, 36, 58)' });
+    assert.deepEqual(style, { size: '36px', color: 'rgb(255, 224, 136)', background: 'rgba(0, 0, 0, 0)' });
     await host().locator('.close').click();
   });
 
@@ -351,6 +360,7 @@ try {
       return track && { mode: track.mode, active: [...(track.activeCues || [])].map(cue => cue.text).join('\n') };
     }), value => value?.mode === 'showing' && value.active.includes('你好'), 'Native captions were not synchronized');
     assert.ok(native.active.includes('Hello'));
+    assert.equal(await page.locator('style[data-captiondrop="native-style"]').evaluate(element => element.sheet.cssRules[0].style.backgroundColor), 'transparent');
     assert.equal(await host().evaluate(element => getComputedStyle(element).visibility), 'hidden');
     await page.screenshot({ path: path.join(artifacts, 'native-fullscreen.png') });
     await page.evaluate(() => document.exitFullscreen());
@@ -383,6 +393,8 @@ try {
     await eventually(() => host().count(), value => value === 1, 'Remembered captions were not restored without an extension click');
     await seek(2);
     await expectCaption('你好 · مرحبًا · Hello 👋\nSecond line & readable text.');
+    assert.equal(await host().locator('#background-color').inputValue(), 'transparent');
+    assert.equal(await caption().evaluate(element => getComputedStyle(element).backgroundColor), 'rgba(0, 0, 0, 0)');
   });
 
   await check('A different video does not inherit the previous caption file', async () => {
@@ -491,7 +503,8 @@ try {
     await seek(2);
     await expectCaption('你好 · مرحبًا · Hello 👋\nSecond line & readable text.');
     const style = await caption().evaluate(element => ({ size: getComputedStyle(element).fontSize, color: getComputedStyle(element).color, background: getComputedStyle(element).backgroundColor }));
-    assert.deepEqual(style, { size: '36px', color: 'rgb(255, 224, 136)', background: 'rgb(23, 36, 58)' });
+    assert.deepEqual(style, { size: '36px', color: 'rgb(255, 224, 136)', background: 'rgba(0, 0, 0, 0)' });
+    assert.equal(await host().locator('#background-color').inputValue(), 'transparent');
     await page.screenshot({ path: path.join(artifacts, 'restored-after-restart.png'), fullPage: true });
   });
 

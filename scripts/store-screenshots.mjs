@@ -71,7 +71,12 @@ async function routeDemo(route) {
 }
 
 async function setControl(host, selector, value) {
-  await host.locator(selector).evaluate((input, next) => { input.value = next; input.dispatchEvent(new Event('input', { bubbles: true })); }, value);
+  const control = host.locator(selector);
+  if (await control.evaluate(element => element.tagName === 'SELECT')) {
+    await control.selectOption(value);
+    return;
+  }
+  await control.evaluate((input, next) => { input.value = next; input.dispatchEvent(new Event('input', { bubbles: true })); }, value);
 }
 
 async function presentVideoFrame(page, time) {
@@ -165,13 +170,13 @@ try {
   await capture(page, '01-local-subtitles');
 
   await page.locator('#headline').evaluate(element => { element.textContent = 'Make captions feel like yours.'; });
-  await page.locator('#summary').evaluate(element => { element.textContent = 'Choose the size and colors. Drag captions to find the perfect position.'; });
+  await page.locator('#summary').evaluate(element => { element.textContent = 'Choose the size, text color, and a black or transparent background. Drag captions to find the perfect position.'; });
   await presentVideoFrame(page, 12);
   await eventually(() => host.locator('#caption-text').textContent(), text => text === 'Make yourself comfortable.', 'Second caption did not synchronize');
   await host.locator('.trigger').click();
   await setControl(host, '#font-size', '36');
   await setControl(host, '#text-color', '#ffe8a3');
-  await setControl(host, '#background-color', '#18243a');
+  await setControl(host, '#background-color', 'transparent');
   await host.locator('.close').click();
   const caption = host.locator('#caption-text');
   const bounds = await caption.boundingBox();

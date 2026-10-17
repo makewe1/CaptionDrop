@@ -93,10 +93,19 @@ test('invalid saved cue data is rejected before index construction', () => {
 test('appearance values are clamped, colors validated, and defaults preserved', () => {
   assert.deepEqual(normalizeStyle(), DEFAULT_STYLE);
   assert.deepEqual(normalizeStyle({ size: '120', color: '#AbC', background: 'url(evil)', x: -4, y: 8 }), {
-    size: 64, color: '#aabbcc', background: '#000000', x: 0.05, y: 0.95,
+    size: 64, color: '#aabbcc', background: 'transparent', x: 0.05, y: 0.95,
   });
   assert.deepEqual(normalizeStyle({ size: NaN, color: null, x: null, y: Infinity }), DEFAULT_STYLE);
   assert.equal(normalizeStyle({ size: 4 }).size, 16);
+});
+
+test('caption backgrounds default to transparent and migrate saved custom colors to transparent', () => {
+  assert.equal(DEFAULT_STYLE.background, 'transparent');
+  assert.equal(normalizeStyle({ background: '#000000' }).background, '#000000');
+  assert.equal(normalizeStyle({ background: 'transparent' }).background, 'transparent');
+  for (const background of ['#17243a', '#fff', '#FFFFFF', 'red', 'rgba(0,0,0,0)', 'url(evil)', null]) {
+    assert.equal(normalizeStyle({ background }).background, 'transparent');
+  }
 });
 
 test('YouTube identity survives URL variants, tracking, time changes, and ephemeral sources', () => {

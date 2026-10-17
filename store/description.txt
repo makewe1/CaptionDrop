@@ -3,7 +3,7 @@ Your video. Your subtitles.
 CaptionDrop lets you add your own SRT subtitle files to supported online videos. Select a detected video, choose a subtitle file from your computer, and keep the focus on what you are watching.
 
 MAKE CAPTIONS EASY TO READ
-- Choose the text size, text color, and background color.
+- Choose the text size, text color, and a black or transparent background.
 - Drag subtitles to your preferred position within the video.
 - Show or hide captions, or replace the subtitle file from the player controls.
 
