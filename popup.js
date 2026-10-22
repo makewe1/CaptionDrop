@@ -7,6 +7,11 @@ let tabId;
 let selected;
 let scanResult;
 let scanning = false;
+const parameters = new URLSearchParams(location.search);
+const requestedFrame = parameters.get('frameId');
+const requestedVideo = parameters.get('videoId');
+const requestedTarget = requestedFrame && /^\d+$/.test(requestedFrame) && /^cd-video-\d+$/.test(requestedVideo || '')
+  ? { frameId: Number(requestedFrame), id: requestedVideo } : null;
 
 function status(message, error = false) {
   $('#status').textContent = message;
@@ -18,6 +23,8 @@ async function send(message) {
   return result;
 }
 function renderVideos(videos) {
+  const wanted = selected || requestedTarget;
+  selected = undefined;
   list.replaceChildren();
   $('#video-count').textContent = videos.length ? `${videos.length} found` : '';
   $('#empty').hidden = Boolean(videos.length);
@@ -26,6 +33,11 @@ function renderVideos(videos) {
     button.className = 'video-card';
     button.dataset.videoId = video.id;
     button.dataset.frameId = video.frameId;
+    if (wanted?.id === video.id && wanted.frameId === video.frameId) {
+      selected = video;
+      button.classList.add('selected');
+      button.setAttribute('aria-current', 'true');
+    }
     const preview = document.createElement('span');
     preview.className = 'preview'; preview.textContent = '▷'; preview.setAttribute('aria-hidden', 'true');
     const info = document.createElement('span'); info.className = 'info';
@@ -39,8 +51,11 @@ function renderVideos(videos) {
     button.append(preview, info, arrow);
     button.addEventListener('click', () => {
       selected = video;
-      list.querySelectorAll('.selected').forEach(element => element.classList.remove('selected'));
+      list.querySelectorAll('.selected').forEach(element => {
+        element.classList.remove('selected'); element.removeAttribute('aria-current');
+      });
       button.classList.add('selected');
+      button.setAttribute('aria-current', 'true');
       fileInput.value = '';
       // Keep the system picker directly within this click's user activation.
       fileInput.click();
@@ -59,14 +74,31 @@ async function scan() {
     const auto = $('#auto-load');
     auto.disabled = scanResult.autoEnabled || !scanResult.origin;
     auto.textContent = scanResult.autoEnabled ? 'Automatic loading enabled' : 'Enable automatic loading';
+    const embedded = $('#embedded-origin');
+    const previousOrigin = embedded.value;
+    embedded.replaceChildren();
+    const prompt = document.createElement('option');
+    prompt.value = ''; prompt.textContent = 'Select the video player’s site…';
+    embedded.append(prompt);
+    for (const origin of scanResult.blockedOrigins) {
+      const option = document.createElement('option');
+      option.value = origin;
+      option.textContent = new URL(origin).host;
+      embedded.append(option);
+    }
+    if (scanResult.blockedOrigins.includes(previousOrigin)) embedded.value = previousOrigin;
     $('#embedded-access').hidden = !scanResult.blockedOrigins.length;
+    $('#enable-embedded').disabled = !embedded.value;
     $('#memory-note').textContent = scanResult.incognito
-      ? 'Private-window captions are kept only for the private session.'
+      ? 'Private captions stay only on this page and are discarded when it reloads or closes.'
       : scanResult.autoEnabled ? 'Saved captions will load when you revisit the same video.'
         : 'Allow this site once to restore saved captions on your next visit.';
+    if (requestedTarget && selected) list.querySelector('.selected')?.focus();
     status(scanResult.videos.length
-      ? 'Choose an SRT file for the video you want to caption.'
-      : scanResult.blockedOrigins.length ? 'An embedded player may need site access. Enable embedded players below.'
+      ? requestedTarget && selected ? 'Select the highlighted video to choose its subtitle file.'
+        : requestedTarget ? 'The requested video is no longer available. Choose another video or scan again.'
+          : 'Choose an SRT file for the video you want to caption.'
+      : scanResult.blockedOrigins.length ? 'An embedded player may need site access. Choose its site below.'
         : 'Play the video first, then try scanning again.');
   } catch (error) {
     renderVideos([]);
@@ -107,12 +139,16 @@ function enableOrigins(origins) {
   }).catch(error => status(error.message, true));
 }
 $('#auto-load').addEventListener('click', () => enableOrigins(scanResult?.origin ? [scanResult.origin] : []));
-$('#embedded-access').addEventListener('click', () => enableOrigins(
-  [...new Set([scanResult?.origin, ...(scanResult?.blockedOrigins || [])].filter(Boolean))]
-));
+$('#embedded-origin').addEventListener('change', () => {
+  $('#enable-embedded').disabled = !$('#embedded-origin').value;
+});
+$('#enable-embedded').addEventListener('click', () => {
+  const origin = $('#embedded-origin').value;
+  if (scanResult?.blockedOrigins.includes(origin)) enableOrigins([origin]);
+});
 (async () => {
   try {
-    const requested = new URLSearchParams(location.search).get('tabId');
+    const requested = parameters.get('tabId');
     if (requested && /^\d+$/.test(requested)) tabId = Number(requested);
     else tabId = (await chrome.tabs.query({ active: true, currentWindow: true }))[0]?.id;
     if (tabId === undefined) throw new Error('Open a video in a browser tab to get started.');

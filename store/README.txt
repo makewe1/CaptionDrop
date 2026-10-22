@@ -7,6 +7,7 @@ Text fields
 - description.txt: detailed store description, ready to paste.
 - short-description.txt: 125-character summary (within the 132-character limit).
 - category.txt: recommended category name.
+- ../PRIVACY.md: privacy policy for the public repository policy URL.
 
 Screenshots
 1. screenshots/01-local-subtitles.png — local subtitles on a sample HTML5 video.

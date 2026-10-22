@@ -7,6 +7,8 @@
   'use strict';
 
   const MAX_FILE_BYTES = 2 * 1024 * 1024;
+  // Decoded text is bounded in UTF-16 code units, independently of file encoding.
+  const MAX_TEXT_LENGTH = MAX_FILE_BYTES;
   const MAX_CUES = 20000;
   const DEFAULT_STYLE = Object.freeze({
     size: 28, color: '#ffffff', background: 'transparent', x: 0.5, y: 0.86,
@@ -44,11 +46,52 @@
     }
   }
 
+  function removeClosedMarkup(text, opening, closing) {
+    const pieces = [];
+    let cursor = 0;
+    let match;
+    while ((match = opening.exec(text))) {
+      const end = text.indexOf(closing, opening.lastIndex);
+      // No later opening can have a closing delimiter either. Leave the
+      // remaining malformed text intact instead of rescanning its suffixes.
+      if (end < 0) break;
+      pieces.push(text.slice(cursor, match.index));
+      cursor = end + closing.length;
+      opening.lastIndex = cursor;
+    }
+    pieces.push(text.slice(cursor));
+    return pieces.join('');
+  }
+
+  function replaceLineBreaks(text) {
+    const opening = /<br/gi;
+    const whitespace = /\s/;
+    const pieces = [];
+    let cursor = 0;
+    let match;
+    while ((match = opening.exec(text))) {
+      let end = opening.lastIndex;
+      while (end < text.length && whitespace.test(text[end])) end += 1;
+      if (text[end] === '/') {
+        end += 1;
+        while (end < text.length && whitespace.test(text[end])) end += 1;
+      }
+      if (text[end] !== '>') {
+        opening.lastIndex = end;
+        continue;
+      }
+      pieces.push(text.slice(cursor, match.index), '\n');
+      cursor = end + 1;
+      opening.lastIndex = cursor;
+    }
+    pieces.push(text.slice(cursor));
+    return pieces.join('');
+  }
+
   function plainSubtitleText(text) {
-    return text
-      .replace(/\{\\[^}]*\}/g, '')
-      .replace(/<br\s*\/?\s*>/gi, '\n')
-      .replace(/<\/?[a-z][^>]*>/gi, '')
+    const withoutAss = removeClosedMarkup(text, /\{\\/g, '}');
+    const withLineBreaks = replaceLineBreaks(withoutAss);
+    return removeClosedMarkup(withLineBreaks, /<\/?[a-z]/gi, '>')
       .replace(/&(#x[\da-f]+|#\d+|[a-z]+);/gi, (entity, name) => {
         if (name[0] !== '#') {
           const lower = name.toLowerCase();
@@ -63,12 +106,18 @@
   }
 
   function parseSrt(text) {
-    if (typeof text !== 'string' || !text.trim()) {
+    if (typeof text !== 'string') {
+      throw new Error('This file contains no subtitles. Choose a valid .srt file.');
+    }
+    if (text.length > MAX_TEXT_LENGTH) {
+      throw new Error('This subtitle text is too large to process. Choose a smaller SRT file.');
+    }
+    if (!text.trim()) {
       throw new Error('This file contains no subtitles. Choose a valid .srt file.');
     }
     const blocks = text.replace(/^\ufeff/, '').replace(/\r\n?/g, '\n').trim().split(/\n[\t ]*\n+/);
     const cues = [];
-    const timing = /^(\d+):(\d{2}):(\d{2})[,.](\d{1,3})\s*-->\s*(\d+):(\d{2}):(\d{2})[,.](\d{1,3})(?:[\t ]+.*)?$/;
+    const timing = /^(\d+):(\d{2}):(\d{2})[,.](\d{1,3})\s*-->\s*(\d+):(\d{2}):(\d{2})[,.](\d{1,3})(?:[\t ].*)?$/;
     for (let blockNumber = 0; blockNumber < blocks.length; blockNumber += 1) {
       const lines = blocks[blockNumber].split('\n');
       const timingLine = /^\s*\d+\s*$/.test(lines[0]) ? 1 : 0;
@@ -237,7 +286,10 @@
     const top = topUrl ? pageIdentity(topUrl) : page;
     const providerKnown = page.startsWith('youtube:') || page.startsWith('bilibili:');
     const media = providerKnown ? '' : normalizedUrl(src, pageUrl, true);
-    const slot = Number.isFinite(Number(ordinal)) ? Math.max(0, Math.floor(Number(ordinal))) : 0;
+    // Provider IDs already identify their logical video. Other players appearing
+    // or disappearing must not change a remembered YouTube/Bilibili association.
+    const slot = providerKnown ? 0
+      : Number.isFinite(Number(ordinal)) ? Math.max(0, Math.floor(Number(ordinal))) : 0;
     return JSON.stringify(['captiondrop-v1', top && top !== page ? top : '', page, media, slot]);
   }
 
@@ -253,7 +305,7 @@
   }
 
   return Object.freeze({
-    MAX_FILE_BYTES, MAX_CUES, DEFAULT_STYLE, decodeSubtitle, parseSrt,
+    MAX_FILE_BYTES, MAX_TEXT_LENGTH, MAX_CUES, DEFAULT_STYLE, decodeSubtitle, parseSrt,
     buildCueIndex, activeCues, normalizeStyle, videoKey, hashKey,
   });
 });

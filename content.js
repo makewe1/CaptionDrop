@@ -1,11 +1,19 @@
 /* CaptionDrop — runs only after activation or on a remembered, permitted site. */
 (() => {
   'use strict';
-  if (globalThis.__captionDrop) return;
   const Core = globalThis.CaptionDropCore;
-  if (!Core) return;
+  const extensionId = chrome.runtime?.id;
+  if (!Core || !extensionId) return;
+  const previous = globalThis.__captionDrop;
+  if (previous?.extensionId === extensionId && !previous.disposed) return;
+  previous?.dispose?.();
+  const extensionOrigin = `chrome-extension://${extensionId}`;
+  const takeoverEvent = `captiondrop:takeover:${extensionId}`;
+  // Isolated worlds are replaced on extension reload. Retire the previous
+  // instance before creating another overlay in the same document.
+  document.dispatchEvent(new Event(takeoverEvent));
+  document.querySelectorAll('captiondrop-player[data-captiondrop-overlay],captiondrop-control[data-captiondrop="control"],style[data-captiondrop="native-style"]').forEach(element => element.remove());
 
-  const MAX_FILE_BYTES = 2 * 1024 * 1024;
   const videos = new Map();
   const watchedRoots = new Map();
   const nativeTracks = new WeakMap();
@@ -17,28 +25,53 @@
   let previousUrl = location.href;
   let scanTimer = 0;
   let restoreVersion = 0;
+  let restoreRetryTimer = 0;
+  let restoreRetryCount = 0;
   let context = { incognito: false, autoEnabled: false };
+  let contextReady = false;
+  let contextPromise = null;
   let disposed = false;
   let restoreSuppressed = false;
   const pageAbort = new AbortController();
   const svgIcon = '<svg viewBox="0 0 24 24" width="23" height="23" aria-hidden="true"><path d="M9.75 3a9 9 0 0 1 0 18a4.5 4.5 0 0 1 0-9a4.5 4.5 0 0 0 0-9Z" fill="currentColor"/></svg>';
 
+  function alive() {
+    if (disposed) return false;
+    try { if (chrome.runtime?.id === extensionId) return true; } catch {}
+    dispose();
+    return false;
+  }
+
   async function send(message) {
+    if (!alive()) return { ok: false, error: 'CaptionDrop was reloaded. Reopen the extension to continue.' };
     try {
       const result = await chrome.runtime.sendMessage(message);
       return result || { ok: false, error: 'CaptionDrop could not reach its background service. Try reopening the extension.' };
     } catch (error) {
-      return { ok: false, error: 'CaptionDrop was reloaded. Refresh this page and try again.' };
+      alive();
+      return { ok: false, error: 'CaptionDrop was reloaded. Reopen the extension to continue.' };
     }
   }
 
+  async function ensureContext() {
+    if (contextReady || !alive()) return;
+    if (!contextPromise) {
+      contextPromise = send({ type: 'CD_CONTEXT' }).then(result => {
+        if (!alive() || !result.ok) return;
+        context = result;
+        contextReady = true;
+        if (result.topUrl) topUrl = result.topUrl;
+      }).finally(() => { contextPromise = null; });
+    }
+    await contextPromise;
+  }
+
   function keyFor(info) {
-    const all = [...videos.values()];
     return Core.videoKey({
       pageUrl: location.href,
       topUrl: topUrl || location.href,
       src: sourceFor(info.video),
-      ordinal: Math.max(0, all.indexOf(info))
+      ordinal: info.slot
     });
   }
 
@@ -92,15 +125,46 @@
     });
   }
 
+  function isMainVideo(info) {
+    return Boolean(info.video.closest('#movie_player, .bpx-player-video-area, .bilibili-player-video-wrap'));
+  }
+
+  function restoreCandidates() {
+    const connected = [...videos.values()].filter(info => info.video.isConnected);
+    if (!connected.length || !providerIdentity(keyFor(connected[0]))) return connected;
+    const eligible = connected.filter(info => !info.video.closest('#inline-preview-player, ytd-video-preview'));
+    const main = eligible.filter(isMainVideo);
+    // A provider's previews can be registered before its main player appears.
+    // Keep an existing main player authoritative even while hidden, but wait
+    // until it has usable bounds instead of restoring into a preview.
+    return (main.length ? main : eligible).filter(info => {
+      const rect = info.video.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0 && getComputedStyle(info.video).visibility !== 'hidden';
+    }).sort((left, right) => {
+      const a = left.video.getBoundingClientRect();
+      const b = right.video.getBoundingClientRect();
+      return b.width * b.height - a.width * a.height;
+    });
+  }
+
   function registerVideo(video) {
-    if ([...videos.values()].some(info => info.video === video)) return;
-    const info = { id: `cd-video-${++sequence}`, video, abort: new AbortController(), attemptedToken: null };
+    if (!alive() || [...videos.values()].some(info => info.video === video)) return;
+    const occupied = new Set([...videos.values()].filter(info => info.video.isConnected).map(info => info.slot));
+    let slot = 0;
+    while (occupied.has(slot)) slot++;
+    const info = { id: `cd-video-${++sequence}`, slot, video, abort: new AbortController(), attemptedToken: null };
     videos.set(info.id, info);
+    // Keep generic player slots stable while their DOM elements survive. A
+    // replacement element can reuse the disconnected player's vacated slot.
+    if (active?.autoRestored && active.providerKnown && isMainVideo(info) && !isMainVideo(active.info)) {
+      attempted.delete(active.identityToken);
+      detach();
+    }
     const changed = () => {
       if (active?.info === info) checkIdentity();
       scheduleIdentityCheck();
     };
-    for (const event of ['loadedmetadata', 'emptied', 'loadstart']) {
+    for (const event of ['loadedmetadata', 'emptied', 'loadstart', 'play']) {
       video.addEventListener(event, changed, { signal: info.abort.signal });
     }
   }
@@ -119,6 +183,7 @@
   function watch(root) {
     if (watchedRoots.has(root)) return;
     const observer = new MutationObserver(mutations => {
+      if (!alive()) return;
       let dirty = false;
       let removedElements = false;
       for (const mutation of mutations) {
@@ -154,6 +219,7 @@
   }
 
   function scan() {
+    if (!alive()) return [];
     discover(document);
     cleanupRemoved();
     void restore();
@@ -177,7 +243,7 @@
   }
 
   function scheduleIdentityCheck() {
-    if (scanTimer || disposed) return;
+    if (scanTimer || !alive()) return;
     scanTimer = setTimeout(() => {
       scanTimer = 0;
       cleanupRemoved();
@@ -206,9 +272,11 @@
   }
 
   async function restore() {
-    if (disposed || restoreSuppressed || active || !videos.size) return;
+    if (!alive() || restoreSuppressed || active || !videos.size) return;
+    await ensureContext();
+    if (!alive() || !contextReady || context.incognito || context.memoryAvailable === false || restoreSuppressed || active) return;
     const version = restoreVersion;
-    for (const info of videos.values()) {
+    for (const info of restoreCandidates()) {
       if (active || version !== restoreVersion) return;
       const identity = keyFor(info);
       const token = tokenFor(identity);
@@ -216,15 +284,24 @@
       attempted.add(token);
       info.attemptedToken = token;
       const result = await send({ type: 'CD_RESTORE', identity });
-      if (disposed || version !== restoreVersion || active) return;
+      if (!alive() || version !== restoreVersion || active) return;
       if (!info.video.isConnected || tokenFor(keyFor(info)) !== token) continue;
+      if (result.retry) {
+        attempted.delete(token);
+        if (!restoreRetryTimer && restoreRetryCount < 3) {
+          restoreRetryTimer = setTimeout(() => {
+            restoreRetryTimer = 0;
+            void restore();
+          }, 500 * 2 ** restoreRetryCount++);
+        }
+      }
       if (result.ok && result.record) {
         try {
           const record = result.record;
           const cues = Core.parseSrt(record.text);
           if (!cues.length) continue;
-          attach(info, { ...record, cues, identity, remembered: true });
-          setStatus(active, context.incognito ? 'Remembered for this private session.' : 'Restored from this device.');
+          attach(info, { ...record, cues, identity, remembered: true, restored: true });
+          setStatus(active, 'Restored from this device.');
         } catch {
           // A damaged saved entry must never interrupt the website or playback.
         }
@@ -243,8 +320,11 @@
   }
 
   async function load(info, text, fileName, remember = true) {
+    await ensureContext();
+    if (!alive()) throw new Error('CaptionDrop was reloaded. Reopen the extension to continue.');
+    remember = remember && contextReady && !context.incognito && context.memoryAvailable !== false;
     if (!info || !info.video.isConnected) throw new Error('This video is no longer available. Scan again and select a video.');
-    if (typeof text !== 'string' || new TextEncoder().encode(text).byteLength > MAX_FILE_BYTES) {
+    if (typeof text !== 'string' || text.length > Core.MAX_TEXT_LENGTH) {
       throw new Error('Choose an SRT file smaller than 2 MB.');
     }
     const cues = Core.parseSrt(text);
@@ -259,7 +339,7 @@
     const state = active;
     if (!remember) {
       setStatus(state, 'Loaded for this visit.');
-      return { ok: true, saved: false, cueCount: cues.length };
+      return { ok: true, saved: false, private: Boolean(context.incognito), cueCount: cues.length };
     }
     setStatus(state, 'Saving on this device…');
     const result = await send({ type: 'CD_SAVE', identity, text, fileName: state.fileName, style: state.style, enabled: true });
@@ -268,7 +348,7 @@
       state.controls.forget.disabled = !state.remembered;
       if (state.remembered) queueSave(state);
       setStatus(state, state.remembered ?
-        (context.incognito ? 'Remembered for this private session.' : 'Saved on this device. Restores on this video.') :
+        'Saved on this device. Restores on this video.' :
         (result.error || 'Captions loaded. Memory is unavailable for this visit.'), !state.remembered);
     }
     return { ok: true, saved: Boolean(result.ok && result.saved), cueCount: cues.length, ...(result.error ? { warning: result.error } : {}) };
@@ -315,7 +395,7 @@
     host.setAttribute('data-captiondrop', 'player');
     host.setAttribute('data-captiondrop-overlay', '');
     host.style.cssText = 'all:initial!important;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif!important;font-size:13px!important;line-height:1.4!important;display:block!important;position:fixed!important;z-index:2147483647!important;pointer-events:none!important;margin:0!important;padding:0!important;border:0!important;';
-    const root = host.attachShadow({ mode: 'open' });
+    const root = host.attachShadow({ mode: 'closed' });
     const styleElement = make('style');
     styleElement.textContent = STYLES;
     root.append(styleElement);
@@ -349,11 +429,6 @@
     const fileButton = make('button', 'file', 'Choose subtitle file');
     fileButton.id = 'replace-file';
     fileButton.type = 'button';
-    const input = make('input');
-    input.type = 'file';
-    input.id = 'file-input';
-    input.accept = '.srt,application/x-subrip';
-    input.hidden = true;
     const enabledRow = make('div', 'row');
     const enabledLabel = make('label', '', 'Show captions');
     const enabled = make('input', 'toggle');
@@ -392,7 +467,7 @@
     const forget = make('button', 'forget', 'Forget saved subtitles');
     forget.id = 'forget';
     forget.type = 'button';
-    panel.append(header, fileName, fileButton, input, make('div', 'divider'), enabledRow, make('div', 'divider'), sizeRow, size, textRow, backgroundRow, hint, status, forget);
+    panel.append(header, fileName, fileButton, make('div', 'divider'), enabledRow, make('div', 'divider'), sizeRow, size, textRow, backgroundRow, hint, status, forget);
     surface.append(caption, trigger, panel);
     root.append(surface);
     const state = {
@@ -401,10 +476,10 @@
       text: options.text, fileName: safeFileName(options.fileName),
       cues: options.cues, index: Core.buildCueIndex(options.cues),
       style: Core.normalizeStyle(options.style || Core.DEFAULT_STYLE), enabled: options.enabled !== false,
-      remembered: Boolean(options.remembered), host, root, surface, caption, trigger, panel, status,
+      remembered: Boolean(options.remembered) && !context.incognito, autoRestored: Boolean(options.restored), host, root, surface, caption, trigger, panel, status,
       controls: { enabled, size, sizeOutput, color, background, forget, close },
       abort: new AbortController(), currentText: '', saveTimer: 0, frameId: null, fallbackTimer: 0,
-      layoutId: 0, resize: null, integrated: null, integratedRoot: null, drag: null, disposed: false, nativeActive: false, nativeInfo: null, adObserver: null, adSuppressed: false
+      layoutId: 0, geometryTimer: 0, geometry: null, resize: null, integrated: null, integratedRoot: null, drag: null, disposed: false, nativeActive: false, nativeInfo: null, adObserver: null, adSuppressed: false
     };
     active = state;
     document.documentElement.append(host);
@@ -423,39 +498,39 @@
     listen(trigger, 'keydown', stopPlayer);
     listen(trigger, 'keyup', stopPlayer);
     listen(close, 'click', () => setPanel(state, false, true));
-    listen(fileButton, 'click', () => input.click());
-    listen(input, 'change', async () => {
-      const file = input.files?.[0];
-      input.value = '';
-      if (!file) return;
-      try {
-        if (!/\.srt$/i.test(file.name)) throw new Error('Choose a subtitle file ending in .srt.');
-        if (file.size > MAX_FILE_BYTES) throw new Error('Choose an SRT file smaller than 2 MB.');
-        setStatus(state, 'Reading subtitle file…');
-        const text = await Core.decodeSubtitle(await file.arrayBuffer());
-        if (state !== active) return;
-        const result = await load(info, text, file.name, true);
-        if (result.ok && active) setPanel(active, true);
-      } catch (error) {
-        setStatus(state, error.message || 'Could not read this subtitle file.', true);
-      }
+    listen(fileButton, 'click', async event => {
+      if (!event.isTrusted) return;
+      fileButton.disabled = true;
+      const result = await send({ type: 'CD_OPEN_PICKER', videoId: info.id });
+      if (state !== active) return;
+      fileButton.disabled = false;
+      setStatus(state, result.ok ? 'Choose your video and subtitle file in CaptionDrop.' :
+        (result.error || 'Could not open the subtitle picker. Try the CaptionDrop toolbar button.'), !result.ok);
     });
-    listen(enabled, 'change', () => {
+    listen(enabled, 'change', event => {
+      if (!event.isTrusted) { enabled.checked = state.enabled; return; }
       state.enabled = enabled.checked;
       updateNativeFullscreen(state);
       if (state.enabled) { render(state); startClock(state); }
       else { stopClock(state); state.caption.hidden = true; }
       queueSave(state);
     });
-    const applySettings = () => {
-      state.style = Core.normalizeStyle({ ...state.style, size: Number(size.value), color: color.value, background: background.value });
+    const applySettings = event => {
+      if (!event.isTrusted) {
+        size.value = String(state.style.size); color.value = state.style.color; background.value = state.style.background;
+        return;
+      }
+      const change = event.target === size ? { size: Number(size.value) } :
+        event.target === color ? { color: color.value } : { background: background.value };
+      state.style = Core.normalizeStyle({ ...state.style, ...change });
       sizeOutput.value = `${state.style.size} px`;
       applyAppearance(state);
       queueSave(state);
     };
     for (const control of [size, color]) listen(control, 'input', applySettings);
     listen(background, 'change', applySettings);
-    listen(forget, 'click', async () => {
+    listen(forget, 'click', async event => {
+      if (!event.isTrusted || !alive() || context.incognito) return;
       forget.disabled = true;
       const result = await send({ type: 'CD_FORGET', identity: state.identity });
       if (state !== active) return;
@@ -513,6 +588,11 @@
       });
       state.adObserver.observe(youtubePlayer, { attributes: true, attributeFilter: ['class'] });
     }
+    // ResizeObserver does not report position-only layout shifts. Four bounded
+    // geometry reads per second also follow moving players while playback is paused.
+    state.geometryTimer = setInterval(() => {
+      if (state === active && !document.hidden) layout(state);
+    }, 250);
     applyAppearance(state);
     placeHost(state);
     placeControl(state);
@@ -556,7 +636,7 @@
   function setupDragging(state, listen) {
     const caption = state.caption;
     listen(caption, 'pointerdown', event => {
-      if (event.button !== 0) return;
+      if (!event.isTrusted || event.button !== 0) return;
       event.preventDefault(); event.stopPropagation();
       const bounds = state.host.getBoundingClientRect();
       const current = caption.getBoundingClientRect();
@@ -565,7 +645,7 @@
       caption.setPointerCapture(event.pointerId);
     });
     listen(caption, 'pointermove', event => {
-      if (!state.drag || state.drag.pointer !== event.pointerId) return;
+      if (!event.isTrusted || !state.drag || state.drag.pointer !== event.pointerId) return;
       event.preventDefault(); event.stopPropagation();
       const bounds = state.drag.bounds;
       if (!bounds.width || !bounds.height) return;
@@ -576,7 +656,7 @@
       positionCaption(state);
     });
     const endDrag = event => {
-      if (!state.drag) return;
+      if (!event.isTrusted || !state.drag) return;
       event.preventDefault(); event.stopPropagation();
       state.drag = null;
       caption.classList.remove('dragging');
@@ -590,6 +670,7 @@
     listen(caption, 'click', event => { event.preventDefault(); event.stopPropagation(); });
     listen(caption, 'dblclick', event => { event.preventDefault(); event.stopPropagation(); });
     listen(caption, 'keydown', event => {
+      if (!event.isTrusted) return;
       const moves = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
       const move = moves[event.key];
       event.stopPropagation();
@@ -604,12 +685,14 @@
   }
 
   function queueSave(state) {
+    state.autoRestored = false;
     clearTimeout(state.saveTimer);
-    if (!state.remembered) return;
-    state.saveTimer = setTimeout(() => { void persistSettings(state); }, 350);
+    if (!alive() || context.incognito || context.memoryAvailable === false || !state.remembered) return;
+    state.saveTimer = setTimeout(() => { state.saveTimer = 0; void persistSettings(state); }, 350);
   }
 
   async function persistSettings(state) {
+    if (!alive() || context.incognito || context.memoryAvailable === false) return;
     const result = await send({ type: 'CD_UPDATE', identity: state.identity, style: state.style, enabled: state.enabled });
     if (state === active && (!result.ok || result.saved === false)) {
       setStatus(state, result.error || 'Your change is active, but could not be remembered.', true);
@@ -745,7 +828,7 @@
       const control = document.createElement('captiondrop-control');
       control.setAttribute('data-captiondrop', 'control');
       control.style.cssText = 'display:inline-flex!important;align-items:center!important;justify-content:center!important;width:40px!important;height:100%!important;min-height:24px!important;vertical-align:top!important;pointer-events:auto!important;flex:none!important;';
-      const root = control.attachShadow({ mode: 'open' });
+      const root = control.attachShadow({ mode: 'closed' });
       const css = make('style');
       css.textContent = ':host{all:initial}button{all:unset;box-sizing:border-box;cursor:pointer;display:flex;align-items:center;justify-content:center;width:40px;height:100%;min-height:28px;color:#fff;opacity:.9}button:hover{opacity:1}button:focus-visible{outline:2px solid #90bfff;outline-offset:-3px}button[aria-expanded=true]{color:#a7c8ff}';
       const button = make('button');
@@ -774,11 +857,14 @@
   }
 
   function layout(state) {
-    if (state !== active) return;
+    if (state !== active || !alive()) return;
     const rect = state.info.video.getBoundingClientRect();
     const width = Math.max(0, rect.width);
     const height = Math.max(0, rect.height);
     const showing = width > 0 && height > 0 && rect.bottom > 0 && rect.right > 0 && rect.top < innerHeight && rect.left < innerWidth;
+    const geometry = [rect.left, rect.top, width, height, showing];
+    if (state.geometry?.every((value, index) => value === geometry[index])) return;
+    state.geometry = geometry;
     state.host.style.setProperty('left', `${rect.left}px`, 'important');
     state.host.style.setProperty('top', `${rect.top}px`, 'important');
     state.host.style.setProperty('width', `${width}px`, 'important');
@@ -788,7 +874,7 @@
   }
 
   function render(state) {
-    if (state !== active || state.disposed) return;
+    if (state !== active || state.disposed || !alive()) return;
     if (sourceFor(state.info.video) !== state.sourceFingerprint) {
       checkIdentity();
       if (state !== active) return;
@@ -808,7 +894,7 @@
   }
 
   function startClock(state) {
-    if (state !== active || state.disposed || state.nativeActive || state.adSuppressed || !state.enabled || state.info.video.paused || state.info.video.ended || document.hidden) return;
+    if (state !== active || state.disposed || !alive() || state.nativeActive || state.adSuppressed || !state.enabled || state.info.video.paused || state.info.video.ended || document.hidden) return;
     if (state.frameId !== null || state.fallbackTimer) return;
     const video = state.info.video;
     if (video.requestVideoFrameCallback) {
@@ -837,16 +923,17 @@
     state.fallbackTimer = 0;
   }
 
-  function detach() {
+  function detach(persist = true) {
     const state = active;
     if (!state) return;
     active = null;
     state.disposed = true;
-    if (state.saveTimer && state.remembered) void persistSettings(state);
+    if (persist && state.saveTimer && state.remembered) void persistSettings(state);
     clearTimeout(state.saveTimer);
     stopClock(state);
     releaseNative(state);
     cancelAnimationFrame(state.layoutId);
+    clearInterval(state.geometryTimer);
     state.resize?.disconnect();
     state.adObserver?.disconnect();
     state.abort.abort();
@@ -864,13 +951,18 @@
     setTimeout(() => marker.remove(), 1000);
   }
 
-  chrome.runtime.onMessage.addListener((message, sender, respond) => {
+  const runtimeListener = (message, sender, respond) => {
+    if (!alive() || sender.id !== extensionId) return;
+    if (sender.url && !sender.url.startsWith(`${extensionOrigin}/`)) return;
+    if (sender.origin && sender.origin !== extensionOrigin) return;
     if (!message?.type?.startsWith('CD_')) return;
     if (!['CD_LIST', 'CD_LOAD', 'CD_HIGHLIGHT', 'CD_DISABLE_ALL', 'CD_CHECK_RESTORE'].includes(message.type)) return;
     const operation = async () => {
       if (message.topUrl && message.topUrl !== topUrl) {
         topUrl = message.topUrl;
         ++restoreVersion;
+        restoreRetryCount = 0;
+        clearTimeout(restoreRetryTimer); restoreRetryTimer = 0;
         attempted.clear();
         suppressed.clear();
         restoreSuppressed = false;
@@ -896,50 +988,70 @@
     };
     operation().then(respond, error => respond({ ok: false, error: error.message || 'Could not load these subtitles.' }));
     return true;
-  });
+  };
+  chrome.runtime.onMessage.addListener(runtimeListener);
 
   // One low-frequency URL check handles single-page navigation on activated pages.
   const navigationTimer = setInterval(() => {
-    if (disposed || document.hidden) return;
+    if (!alive() || document.hidden) return;
     if (location.href !== previousUrl) {
       previousUrl = location.href;
       if (window === window.top) topUrl = location.href;
       ++restoreVersion;
+      restoreRetryCount = 0;
+      clearTimeout(restoreRetryTimer); restoreRetryTimer = 0;
       attempted.clear();
       suppressed.clear();
       restoreSuppressed = false;
       checkIdentity();
       discover(document);
-      void restore();
+      const version = restoreVersion;
+      // Only activated documents report navigation. The background derives the
+      // actual tab/frame URLs instead of observing all browser navigation.
+      void send({ type: 'CD_NAVIGATED' }).then(() => {
+        if (alive() && version === restoreVersion) void restore();
+      });
     }
   }, 1200);
 
   window.addEventListener('pagehide', event => {
     if (event.persisted) { if (active) stopClock(active); return; }
-    disposed = true;
-    detach();
-    clearInterval(navigationTimer);
-    clearTimeout(scanTimer);
-    for (const observer of watchedRoots.values()) observer.disconnect();
-    for (const info of videos.values()) info.abort.abort();
-    pageAbort.abort();
+    // Flush a pending user setting while this normal page still has a valid
+    // extension context; takeover/invalidation disposal never persists state.
+    if (active?.saveTimer && active.remembered) void persistSettings(active);
+    dispose();
   }, { signal: pageAbort.signal });
-  window.addEventListener('pageshow', () => {
+  window.addEventListener('pageshow', event => {
+    if (!alive()) return;
+    if (event.persisted) void send({ type: 'CD_NAVIGATED' });
     if (active) { layout(active); render(active); startClock(active); }
   }, { signal: pageAbort.signal });
+  document.addEventListener(takeoverEvent, () => dispose(), { signal: pageAbort.signal });
+
+  function dispose() {
+    if (disposed) return;
+    disposed = true;
+    ++restoreVersion;
+    // Invalidation/takeover must not flush records through an obsolete context.
+    detach(false);
+    clearInterval(navigationTimer);
+    clearTimeout(scanTimer);
+    clearTimeout(restoreRetryTimer);
+    for (const observer of watchedRoots.values()) observer.disconnect();
+    for (const info of videos.values()) info.abort.abort();
+    watchedRoots.clear(); videos.clear(); attempted.clear(); suppressed.clear();
+    pageAbort.abort();
+    try { chrome.runtime.onMessage.removeListener(runtimeListener); } catch {}
+  }
 
   globalThis.__captionDrop = {
-    list, scan,
+    list, scan, extensionId, dispose,
+    get disposed() { return disposed; },
     get active() { return active ? { videoId: active.info.id, fileName: active.fileName, enabled: active.enabled, style: { ...active.style }, text: active.currentText } : null; }
   };
   watch(document);
   void (async () => {
-    const result = await send({ type: 'CD_CONTEXT' });
-    if (disposed) return;
-    if (result.ok) {
-      context = result;
-      if (result.topUrl) topUrl = result.topUrl;
-    }
+    await ensureContext();
     await restore();
   })();
 })();

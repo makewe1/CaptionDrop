@@ -1,6 +1,6 @@
 # CaptionDrop Privacy Policy
 
-Last updated: 22 October 2026
+Last updated: 23 October 2026
 
 CaptionDrop is a Chrome extension that displays subtitles from user-selected
 local SRT files on supported web videos. This policy explains the information
@@ -16,8 +16,8 @@ CaptionDrop accesses the following information to provide its subtitle features:
   same video. It does not retain the original file's full local path.
 - **Video and webpage information:** page, frame, and media URLs; provider video
   identifiers; page and video titles; and player information needed to find and
-  identify videos. Saved video associations contain normalized URLs or provider
-  identifiers. Page and video titles are used to label detected videos and are
+  identify videos. Saved video associations contain a one-way hash derived from normalized
+  URLs or provider identifiers, rather than readable copies of those values. Page and video titles are used to label detected videos and are
   not saved in subtitle records.
 - **Playback state:** the video's current playback time and playback events,
   used to synchronize captions. These are not retained as a viewing or
@@ -29,6 +29,8 @@ CaptionDrop accesses the following information to provide its subtitle features:
 
 ## How information is used
 
+Subtitle file selection takes place in the extension's own interface.
+
 CaptionDrop uses this information only to detect videos, display and synchronize
 subtitles, apply caption settings, and restore saved subtitles for the matching
 video. Website access is requested when needed for automatic loading or access
@@ -36,7 +38,9 @@ to embedded players. Users control these permissions through Chrome.
 
 Caption text and subtitle cues are inserted into the selected webpage to display
 subtitles, including through a native subtitle track when needed. Scripts running
-on that webpage may be able to access this information.
+on that webpage may be able to access this information. Filename, status, and
+settings controls use closed shadow roots to reduce direct webpage access;
+these are not a security boundary against a compromised browser process.
 
 ## Transmission and sharing
 
@@ -54,16 +58,19 @@ Normal subtitle records and automatic-loading website preferences are stored in
 Chrome's local extension storage. CaptionDrop does not use Chrome's sync storage
 to synchronize this information between devices.
 
-Subtitle memory is limited to 50 video records and approximately 8 MiB in each
-storage context. Older records are removed when necessary to remain within these
+Saved subtitle memory is limited to 50 video records and approximately 8 MiB. Older records are removed when necessary to remain within these
 limits. Otherwise, saved records remain until they are replaced, deleted using
 the extension's controls, or removed by uninstalling the extension. Deleting the
-original SRT file does not delete the extension's saved copy.
+original SRT file does not delete the extension's saved copy. Clearing ordinary
+browsing history or cached website files does not remove extension storage.
 
-Incognito subtitle records use session storage and are cleared after the last
-Incognito window closes. Selected tab and frame identifiers also use session
-storage. Website permissions and automatic-loading preferences are managed
-separately and may persist after private windows close.
+Incognito subtitles, filenames, and appearance settings stay only in the current
+page’s memory. They are not saved to local or session extension storage, are not
+restored on another visit, and are discarded when the page reloads or closes.
+Legacy private subtitle records from earlier versions are removed during startup.
+Selected tab and frame identifiers use session storage for player coordination.
+Website permissions and automatic-loading preferences are managed separately and
+may persist after private windows close.
 
 ## User controls and deletion
 

@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { closedShadow } from './closed-shadow.mjs';
 
 // Reproducible, unedited browser captures of the real unpacked extension.
 // The surrounding page is an explicitly labeled sample HTML5 video, not a
@@ -72,11 +73,29 @@ async function routeDemo(route) {
 
 async function setControl(host, selector, value) {
   const control = host.locator(selector);
-  if (await control.evaluate(element => element.tagName === 'SELECT')) {
-    await control.selectOption(value);
-    return;
+  const settings = await control.evaluate(element => ({
+    type: element.type, min: element.min, max: element.max, step: element.step,
+    options: element.tagName === 'SELECT' ? [...element.options].map(option => option.value) : null,
+  }));
+  let steps;
+  let key;
+  if (settings.options) {
+    steps = settings.options.indexOf(value);
+    assert.ok(steps >= 0, `Unknown option for ${selector}: ${value}`);
+    key = 'ArrowDown';
+  } else {
+    assert.equal(settings.type, 'range', 'Screenshot settings must support trusted keyboard input.');
+    const target = Number(value);
+    assert.ok(target >= Number(settings.min) && target <= Number(settings.max));
+    steps = (target - Number(settings.min)) / Number(settings.step || 1);
+    assert.ok(Number.isInteger(steps));
+    key = 'ArrowRight';
   }
-  await control.evaluate((input, next) => { input.value = next; input.dispatchEvent(new Event('input', { bubbles: true })); }, value);
+  // Native keyboard input produces trusted events, just like the user's controls.
+  await control.focus();
+  await control.press('Home');
+  for (let step = 0; step < steps; step += 1) await control.press(key);
+  assert.equal(await control.inputValue(), value);
 }
 
 async function presentVideoFrame(page, time) {
@@ -159,7 +178,7 @@ try {
   const choosing = popup.waitForEvent('filechooser');
   await popup.locator('.video-card').click();
   await (await choosing).setFiles({ name: 'sample-captions.srt', mimeType: 'application/x-subrip', buffer: Buffer.from(subtitle) });
-  const host = page.locator('captiondrop-player[data-captiondrop-overlay]');
+  const host = closedShadow(page, 'captiondrop-player[data-captiondrop-overlay]');
   await eventually(() => host.count(), count => count === 1, 'The real extension did not attach captions');
   await page.bringToFront();
   await presentVideoFrame(page, 4);
@@ -175,7 +194,6 @@ try {
   await eventually(() => host.locator('#caption-text').textContent(), text => text === 'Make yourself comfortable.', 'Second caption did not synchronize');
   await host.locator('.trigger').click();
   await setControl(host, '#font-size', '36');
-  await setControl(host, '#text-color', '#ffe8a3');
   await setControl(host, '#background-color', 'transparent');
   await host.locator('.close').click();
   const caption = host.locator('#caption-text');

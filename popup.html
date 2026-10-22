@@ -24,7 +24,12 @@
     <section class="memory">
       <div><strong>Pick up where you left off</strong><p id="memory-note">Remember subtitles for each video, on this device.</p></div>
       <button id="auto-load" class="secondary" disabled>Enable automatic loading</button>
-      <button id="embedded-access" class="text-button" hidden>Enable embedded players</button>
+      <div id="embedded-access" hidden>
+        <label for="embedded-origin">Embedded site access</label>
+        <p>Choose the player’s site. Other frames may belong to ads or unrelated services.</p>
+        <select id="embedded-origin" aria-label="Embedded site to allow"></select>
+        <button id="enable-embedded" class="text-button">Allow selected site</button>
+      </div>
     </section>
   </main>
   <footer><span class="local-dot"></span>Local files · No uploads · SRT</footer>

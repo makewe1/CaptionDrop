@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "CaptionDrop",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Your subtitles, on your videos. Load local SRT captions, make them yours, and pick up where you left off.",
   "minimum_chrome_version": "120",
   "permissions": [

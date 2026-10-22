@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { chromium } from 'playwright';
+import { closedShadow } from '../scripts/closed-shadow.mjs';
 
 // Run against an unpacked MV3 extension, never a user's Chrome profile.
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -142,7 +143,6 @@ async function prepareFixtureAccess() {
     const { targetInfo } = await targetSession.send('Target.getTargetInfo');
     await browserSession.send('Extensions.triggerAction', { id: extensionId, targetId: targetInfo.targetId });
     notes.push('The browser toolbar action was triggered through CDP to confer real activeTab access.');
-    return;
   } catch (error) {
     notes.push(`Toolbar-action CDP automation is unavailable (${error.message.split('\n')[0]}).`);
   } finally {
@@ -150,15 +150,15 @@ async function prepareFixtureAccess() {
     await browserSession.detach();
   }
   // Headless Chrome 140 cannot automate its native optional-host-permission
-  // prompt. A disposable clone models grants for these two fixture hosts only;
+  // prompt. A disposable clone models grants for the fixture hosts only;
   // production files and the user's Chrome profile are never modified.
   fixtureClone = await mkdtemp(path.join(tmpdir(), 'captiondrop-fixture-extension-'));
   for (const file of ['manifest.json', 'background.js', 'core.js', 'content.js', 'popup.html', 'popup.js', 'popup.css', 'icons']) {
     await cp(path.join(root, file), path.join(fixtureClone, file), { recursive: true });
   }
   const manifest = JSON.parse(await readFile(path.join(fixtureClone, 'manifest.json'), 'utf8'));
-  manifest.host_permissions = ['http://127.0.0.1/*', 'http://localhost/*',
-    ...(liveProviders ? ['https://www.youtube.com/*', 'https://www.bilibili.com/*'] : [])];
+  manifest.host_permissions = ['http://127.0.0.1/*', 'http://localhost/*', 'https://www.youtube.com/*',
+    ...(liveProviders ? ['https://www.bilibili.com/*'] : [])];
   await writeFile(path.join(fixtureClone, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`);
   const executable = launchedExecutable;
   await context.close();
@@ -168,7 +168,7 @@ async function prepareFixtureAccess() {
   await launch(executable);
   page = await context.newPage();
   await page.goto(`${origin}/index.html?video=one`);
-  notes.push(`TEST-ONLY HOST GRANT MODE: disposable extension clone models prior grants for 127.0.0.1 and localhost${liveProviders ? ', plus the two explicit live provider hosts' : ''}. Native permission prompt UI is not covered.`);
+  notes.push(`TEST-ONLY HOST GRANT MODE: disposable extension clone models prior grants for 127.0.0.1, localhost and the routed YouTube fixture${liveProviders ? ', plus Bilibili for the live probe' : ''}. Native permission prompt UI is not covered.`);
 }
 
 async function probeProvider(name, url) {
@@ -216,7 +216,7 @@ async function scan(target = page) {
   const tabId = await tabIdFor(target);
   return message({ type: 'CD_SCAN', tabId });
 }
-const host = () => page.locator('captiondrop-player[data-captiondrop="player"]');
+const host = () => closedShadow(page, 'captiondrop-player[data-captiondrop="player"]');
 const caption = () => host().locator('.caption');
 async function seek(time, target = page) {
   await target.locator('#primary').evaluate((video, value) => { video.pause(); video.currentTime = value; }, time);
@@ -298,19 +298,21 @@ try {
   await check('Caption controls offer only Black and Transparent backgrounds and apply both locally', async () => {
     await host().locator('.trigger').click();
     const background = host().locator('#background-color');
-    assert.deepEqual(await background.locator('option').evaluateAll(options => options.map(option => ({ label: option.textContent, value: option.value }))), [
+    assert.deepEqual(await background.evaluate(select => [...select.options].map(option => ({ label: option.textContent, value: option.value }))), [
       { label: 'Black', value: '#000000' },
       { label: 'Transparent', value: 'transparent' },
     ]);
     assert.equal(await background.inputValue(), 'transparent');
     assert.equal(await caption().evaluate(element => getComputedStyle(element).backgroundColor), 'rgba(0, 0, 0, 0)');
-    await host().locator('#font-size').evaluate(input => { input.value = '36'; input.dispatchEvent(new Event('input', { bubbles: true })); });
+    await host().locator('#font-size').press('Home');
+    for (let step = 0; step < 20; step++) await host().locator('#font-size').press('ArrowRight');
     await host().locator('#text-color').evaluate(input => { input.value = '#ffe088'; input.dispatchEvent(new Event('input', { bubbles: true })); });
-    await background.selectOption('#000000');
+    assert.equal(await host().locator('#text-color').inputValue(), '#ffffff', 'Synthetic appearance changes must be ignored');
+    await background.press('Home');
     assert.equal(await caption().evaluate(element => getComputedStyle(element).backgroundColor), 'rgb(0, 0, 0)');
-    await background.selectOption('transparent');
+    await background.press('ArrowDown');
     const style = await caption().evaluate(element => ({ size: getComputedStyle(element).fontSize, color: getComputedStyle(element).color, background: getComputedStyle(element).backgroundColor }));
-    assert.deepEqual(style, { size: '36px', color: 'rgb(255, 224, 136)', background: 'rgba(0, 0, 0, 0)' });
+    assert.deepEqual(style, { size: '36px', color: 'rgb(255, 255, 255)', background: 'rgba(0, 0, 0, 0)' });
     await host().locator('.close').click();
   });
 
@@ -334,11 +336,86 @@ try {
     assert.equal(await caption().isVisible(), false);
     await host().locator('#caption-toggle').check();
     await expectCaption('Drag these captions anywhere.');
-    await host().locator('input[type=file]').setInputFiles(path.join(fixtures, 'invalid.srt'));
-    await eventually(() => host().locator('.status').textContent(), text => /invalid|readable|timing|valid/i.test(text), 'No validation message appeared');
-    await expectCaption('Drag these captions anywhere.');
+    assert.equal(await host().locator('input[type=file]').count(), 0, 'Local file inputs must stay outside the webpage');
+    const opening = context.waitForEvent('page');
+    await host().locator('#replace-file').click();
+    const picker = await opening;
+    try {
+      await eventually(() => picker.url(), url => url.startsWith(`chrome-extension://${extensionId}/popup.html?`), 'The extension-owned picker did not open');
+      assert.equal(new URL(picker.url()).searchParams.get('tabId'), String(tabId));
+      const target = picker.locator('#videos .video-card.selected');
+      await eventually(() => target.count(), count => count === 1, 'Requested video was not highlighted in the picker');
+      assert.equal(await target.getAttribute('data-video-id'), new URL(picker.url()).searchParams.get('videoId'));
+      assert.equal(await target.getAttribute('data-frame-id'), new URL(picker.url()).searchParams.get('frameId'));
+      let choosing = picker.waitForEvent('filechooser');
+      await target.click();
+      await (await choosing).setFiles(path.join(fixtures, 'invalid.srt'));
+      await eventually(() => picker.locator('#status').textContent(), text => /invalid|readable|timing|valid/i.test(text), 'No validation message appeared');
+      await expectCaption('Drag these captions anywhere.');
+      choosing = picker.waitForEvent('filechooser');
+      await target.click();
+      await (await choosing).setFiles(path.join(fixtures, 'demo.srt'));
+      await eventually(() => picker.locator('#status').textContent(), text => /demo\.srt loaded/.test(text), 'The replacement subtitle file did not load');
+      await expectCaption('Drag these captions anywhere.');
+    } finally { await picker.close(); }
+    await page.bringToFront();
+    await host().locator('.trigger').click();
     await page.screenshot({ path: path.join(artifacts, 'player-settings.png'), fullPage: true });
     await host().locator('.close').click();
+  });
+
+  await check('Webpage scripts cannot replace, delete, or persist forged caption settings', async () => {
+    await new Promise(resolve => setTimeout(resolve, 500));
+    const before = await worker.evaluate(() => chrome.storage.local.get(null));
+    const pageCount = context.pages().length;
+    const exposed = await page.evaluate(() => {
+      const host = document.querySelector('captiondrop-player');
+      const fake = document.createElement('input');
+      fake.type = 'file';
+      const files = new DataTransfer();
+      files.items.add(new File(['1\n00:00:00,000 --> 00:10:00,000\nInjected by website'], 'website.srt'));
+      fake.files = files.files; host.append(fake);
+      fake.dispatchEvent(new Event('change', { bubbles: true })); fake.remove();
+      host.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      return { root: host.shadowRoot, text: host.textContent, inputs: host.querySelectorAll('input').length,
+        fileName: host.outerHTML.includes('demo.srt'), settings: host.querySelector('#settings-panel') };
+    });
+    assert.deepEqual(exposed, { root: null, text: '', inputs: 0, fileName: false, settings: null }, 'Closed roots exposed private controls to the webpage');
+    // CDP can inspect closed roots for testing; synthetic actions still cannot
+    // persist or delete records even when given a direct node reference.
+    await host().locator('#forget').evaluate(button => button.click());
+    await host().locator('#replace-file').evaluate(button => button.click());
+    await host().locator('#caption-toggle').evaluate(toggle => {
+      toggle.checked = false; toggle.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await new Promise(resolve => setTimeout(resolve, 500));
+    assert.deepEqual(await worker.evaluate(() => chrome.storage.local.get(null)), before, 'Forged webpage events changed saved extension records');
+    assert.equal(context.pages().length, pageCount, 'A synthetic click opened a file picker');
+    await expectCaption('Drag these captions anywhere.');
+    assert.equal(await host().locator('#caption-toggle').isChecked(), true);
+    assert.equal(await host().locator('#font-size').inputValue(), '36');
+    assert.equal(await host().locator('#text-color').inputValue(), '#ffffff');
+    assert.equal(await host().locator('#background-color').inputValue(), 'transparent');
+  });
+
+  await check('Paused captions follow a same-sized video after a position-only layout change', async () => {
+    await seek(6.5);
+    const before = await page.locator('#primary').boundingBox();
+    try {
+      await page.locator('#player').evaluate(player => { player.style.transform = 'translateY(85px)'; });
+      const after = await page.locator('#primary').boundingBox();
+      assert.equal(after.width, before.width); assert.equal(after.height, before.height);
+      assert.ok(after.y > before.y + 80, 'The fixture did not move');
+      await eventually(() => page.evaluate(() => {
+        const video = document.querySelector('#primary').getBoundingClientRect();
+        const overlay = document.querySelector('captiondrop-player').getBoundingClientRect();
+        return Math.abs(video.top - overlay.top) + Math.abs(video.left - overlay.left);
+      }), distance => distance < 2, 'Caption overlay did not follow the moving paused video', 2000);
+      assert.equal(await page.locator('#primary').evaluate(video => video.paused), true);
+    } finally {
+      await page.locator('#player').evaluate(player => { player.style.transform = ''; });
+      await eventually(() => host().boundingBox(), bounds => Math.abs(bounds.y - before.y) < 2, 'Overlay did not return with the video');
+    }
   });
 
   await check('Container fullscreen retains the subtitle overlay and controls', async () => {
@@ -380,6 +457,25 @@ try {
   await check('Memory data is persisted for an individual video', async () => {
     const state = await worker.evaluate(() => chrome.storage.local.get(null));
     assert.ok(JSON.stringify(state).includes('Welcome to CaptionDrop.'), 'Subtitle contents were not persisted locally');
+    const records = Object.values(state).filter(value => value && typeof value.text === 'string');
+    assert.ok(records.length);
+    assert.equal(records.some(record => 'identity' in record), false, 'Readable video identities were persisted');
+    assert.equal(JSON.stringify(records).includes(origin), false, 'Page or media URLs leaked into subtitle records');
+  });
+
+  await check('Content scripts cannot directly read the subtitle storage area', async () => {
+    const result = await worker.evaluate(async tabId => {
+      const [frame] = await chrome.scripting.executeScript({
+        target: { tabId, frameIds: [0] },
+        func: async () => {
+          try { await chrome.storage.local.get(null); return { allowed: true }; }
+          catch (error) { return { allowed: false, error: error.message }; }
+        },
+      });
+      return frame.result;
+    }, tabId);
+    assert.equal(result.allowed, false, 'Content scripts could read the entire local subtitle cache');
+    assert.match(result.error, /access|allowed|context/i);
   });
 
   await check('Optional site permission supports automatic restoration after reload', async () => {
@@ -419,6 +515,50 @@ try {
     assert.equal(after.videos.find(video => video.hasSubtitles).id, selected.id);
   });
 
+  await check('Removing an unrelated earlier video preserves the selected player captions', async () => {
+    const selected = page.locator('video[aria-label="Secondary demo video"]');
+    const overlay = await host().elementHandle();
+    await page.locator('#primary').evaluate(video => video.remove());
+    await new Promise(resolve => setTimeout(resolve, 1600));
+    assert.equal(await overlay.evaluate(element => element.isConnected), true, 'Removing an unrelated video detached the captions');
+    const result = await scan();
+    assert.equal(result.videos.length, 1);
+    assert.equal(result.videos[0].hasSubtitles, true);
+    await selected.evaluate(video => { video.pause(); video.currentTime = 2; });
+    await expectCaption('你好 · مرحبًا · Hello 👋\nSecond line & readable text.');
+    await overlay.dispose();
+  });
+
+  await check('Provider restoration prefers the main player over an earlier preview', async () => {
+    const target = await context.newPage();
+    const route = 'https://www.youtube.com/watch?v=CaptionDropProviderFixture';
+    await context.route(route, request => request.fulfill({ contentType: 'text/html', body: `<!doctype html><title>Local provider identity fixture</title>
+      <style>video{display:block;width:600px;height:300px}#preview{width:120px;height:70px}</style>
+      <video id="preview" aria-label="Unrelated preview"></video><div id="movie_player" class="html5-video-player"><video id="main" aria-label="Main player"></video></div>` }));
+    try {
+      await target.goto(route);
+      const targetId = await openPopup(target);
+      const enabled = await message({ type: 'CD_ENABLE_AUTO', origins: ['https://www.youtube.com/*'] });
+      assert.equal(enabled.ok, true, enabled.error);
+      const found = await scan(target);
+      const main = found.videos.find(video => video.label === 'Main player');
+      const text = await readFile(path.join(fixtures, 'demo.srt'), 'utf8');
+      const loaded = await message({ type: 'CD_LOAD_VIDEO', tabId: targetId, frameId: main.frameId, videoId: main.id, text, fileName: 'provider.srt' });
+      assert.equal(loaded.ok, true, loaded.error);
+      await target.locator('#preview').evaluate(video => video.remove());
+      await new Promise(resolve => setTimeout(resolve, 1500));
+      const selected = (await scan(target)).videos.find(video => video.hasSubtitles);
+      assert.equal(selected?.label, 'Main player', 'Removing a preview detached the main player captions');
+      await target.reload();
+      await eventually(() => target.locator('captiondrop-player').count(), count => count === 1, 'Provider subtitles did not restore');
+      const restored = await scan(target);
+      assert.equal(restored.videos.find(video => video.hasSubtitles)?.label, 'Main player', 'Saved provider captions attached to the preview');
+    } finally {
+      await target.close();
+      await context.unroute(route);
+    }
+  });
+
   await check('Accessible cross-origin iframe is discovered after explicit host grant', async () => {
     await page.goto(`${origin}/index.html?video=frames&frame=1`);
     await page.frameLocator('iframe').locator('#primary').waitFor();
@@ -434,6 +574,99 @@ try {
     const result = await scan();
     assert.equal(result.videos.length, 2);
     assert.ok(result.videos.some(video => video.frameId !== 0));
+  });
+
+  await check('Embedded access requests only the explicitly selected origin', async () => {
+    const target = await context.newPage();
+    await context.route('https://player.example.test/**', route => route.fulfill({ contentType: 'text/html', body: '<video></video>' }));
+    await context.route('https://ads.example.test/**', route => route.fulfill({ contentType: 'text/html', body: '<p>Unrelated frame</p>' }));
+    try {
+      await target.goto(`${origin}/index.html?video=permission-choice`);
+      await target.evaluate(() => {
+        for (const site of ['player', 'ads']) {
+          const frame = document.createElement('iframe'); frame.src = `https://${site}.example.test/`; document.body.append(frame);
+        }
+      });
+      await eventually(() => target.frames().length, count => count === 3, 'Permission fixture frames did not load');
+      await openPopup(target);
+      await eventually(() => popup.locator('#embedded-origin option').count(), count => count === 3, 'Expected separate player and advertising origins');
+      assert.equal(await popup.locator('#enable-embedded').isDisabled(), true, 'The popup selected an unknown origin automatically');
+      await popup.evaluate(() => {
+        globalThis.__originalPermissionRequest = chrome.permissions.request;
+        chrome.permissions.request = async value => { globalThis.__requestedOrigins = value.origins; return false; };
+      });
+      await popup.locator('#embedded-origin').selectOption('https://player.example.test/*');
+      await popup.locator('#enable-embedded').click();
+      const requested = await popup.evaluate(() => globalThis.__requestedOrigins);
+      assert.deepEqual(requested, ['https://player.example.test/*'], 'Embedded permission request included an unrelated origin');
+    } finally {
+      await popup.evaluate(() => { if (globalThis.__originalPermissionRequest) chrome.permissions.request = globalThis.__originalPermissionRequest; }).catch(() => {});
+      await target.close();
+      await context.unroute('https://player.example.test/**');
+      await context.unroute('https://ads.example.test/**');
+    }
+  });
+
+  await check('A replacement iframe automatically restores captions after the selected frame disappears', async () => {
+    const target = await context.newPage();
+    try {
+      await target.goto(`${origin}/index.html?video=iframe-replacement&frame=1`);
+      await target.frameLocator('iframe').locator('#primary').waitFor();
+      const targetId = await openPopup(target);
+      const found = await scan(target);
+      const embedded = found.videos.find(video => video.frameId !== 0);
+      if (!embedded) return { skip: 'The browser did not grant access to the embedded fixture host.' };
+      const enabled = await message({ type: 'CD_ENABLE_AUTO', origins: ['http://localhost/*'] });
+      assert.equal(enabled.ok, true, enabled.error);
+      const text = await readFile(path.join(fixtures, 'demo.srt'), 'utf8');
+      const loaded = await message({ type: 'CD_LOAD_VIDEO', tabId: targetId, frameId: embedded.frameId, videoId: embedded.id, text, fileName: 'demo.srt' });
+      assert.equal(loaded.ok, true, loaded.error);
+      await eventually(() => target.frameLocator('iframe').locator('captiondrop-player').count(), count => count === 1, 'Initial embedded captions did not load');
+      const frameUrl = await target.locator('iframe').getAttribute('src');
+      await target.locator('iframe').evaluate(frame => frame.remove());
+      await target.evaluate(src => {
+        const frame = document.createElement('iframe'); frame.src = src; document.querySelector('#extras').append(frame);
+      }, frameUrl);
+      await target.frameLocator('iframe').locator('#primary').waitFor();
+      const restored = closedShadow(target.frames().find(frame => frame !== target.mainFrame()), 'captiondrop-player');
+      await eventually(() => restored.count(), count => count === 1, 'Saved subtitles did not automatically restore in the replacement iframe');
+      const after = await scan(target);
+      const replacement = after.videos.find(video => video.frameId !== 0 && video.hasSubtitles);
+      assert.ok(replacement, 'The replacement iframe has no selected captions');
+      assert.notEqual(replacement.frameId, embedded.frameId, 'The browser did not create a new iframe identity');
+      await target.frameLocator('iframe').locator('#primary').evaluate(video => { video.pause(); video.currentTime = 2; });
+      await eventually(() => restored.locator('.caption').textContent(), value => value.includes('你好'), 'Replacement iframe captions were not synchronized');
+    } finally { await target.close(); }
+  });
+
+  await check('A removed picker target preserves captions on the previously selected player', async () => {
+    const target = await context.newPage();
+    try {
+      await target.goto(`${origin}/index.html?video=stale-picker&frame=1`);
+      await target.frameLocator('iframe').locator('#primary').waitFor();
+      const targetId = await openPopup(target);
+      const found = await scan(target);
+      const primary = found.videos.find(video => video.frameId === 0);
+      const embedded = found.videos.find(video => video.frameId !== 0);
+      if (!embedded) return { skip: 'The browser did not grant access to the embedded fixture host.' };
+      const text = await readFile(path.join(fixtures, 'demo.srt'), 'utf8');
+      const loaded = await message({ type: 'CD_LOAD_VIDEO', tabId: targetId, frameId: primary.frameId, videoId: primary.id, text, fileName: 'demo.srt' });
+      assert.equal(loaded.ok, true, loaded.error);
+      await target.locator('#primary').evaluate(video => { video.pause(); video.currentTime = 2; });
+      const overlay = closedShadow(target, 'captiondrop-player');
+      await eventually(() => overlay.locator('.caption').textContent(), value => value.includes('你好'), 'The initial captions did not load');
+      await popup.locator('#rescan').click();
+      const card = popup.locator(`.video-card[data-frame-id="${embedded.frameId}"][data-video-id="${embedded.id}"]`);
+      await eventually(() => card.count(), count => count === 1, 'The embedded target was not listed');
+      const choosing = popup.waitForEvent('filechooser');
+      await card.click();
+      const chooser = await choosing;
+      await target.locator('iframe').evaluate(frame => frame.remove());
+      await chooser.setFiles(path.join(fixtures, 'demo.srt'));
+      await eventually(() => popup.locator('#status').textContent(), value => /no longer|removed|frame|receiving end|connection/i.test(value), 'The stale target was not reported');
+      assert.equal(await overlay.count(), 1, 'A failed target change removed the working captions');
+      assert.ok((await overlay.locator('.caption').textContent()).includes('你好'));
+    } finally { await target.close(); }
   });
 
   await check('Replacing a video with an equivalent DOM element restores its saved captions', async () => {
@@ -475,18 +708,42 @@ try {
       const text = await readFile(path.join(fixtures, 'demo.srt'), 'utf8');
       const loaded = await message({ type: 'CD_LOAD_VIDEO', tabId: targetId, frameId: video.frameId, videoId: video.id, text, fileName: 'demo.srt' });
       assert.equal(loaded.ok, true, loaded.error);
-      const control = target.locator('captiondrop-control[data-captiondrop="control"]');
+      const control = closedShadow(target, 'captiondrop-control[data-captiondrop="control"]');
       assert.equal(await control.count(), 1);
+      assert.equal(await target.locator('captiondrop-control').evaluate(element => element.shadowRoot), null);
       await scan(target);
       assert.equal(await control.count(), 1, 'Repeated discovery duplicated the player button');
       await control.locator('button').click();
-      assert.equal(await target.locator('captiondrop-player').locator('#settings-panel').isVisible(), true);
-      await target.locator('captiondrop-player').locator('.close').click();
+      assert.equal(await closedShadow(target, 'captiondrop-player').locator('#settings-panel').isVisible(), true);
+      await closedShadow(target, 'captiondrop-player').locator('.close').click();
       await target.locator('.ytp-fullscreen-button').click();
       assert.equal(await target.locator('.ytp-fullscreen-button').getAttribute('data-clicked'), 'true');
       await eventually(() => target.evaluate(() => document.fullscreenElement?.id), id => id === 'player', 'Original nested fullscreen button stopped working');
       await target.evaluate(() => document.exitFullscreen());
     } finally { await target.close(); }
+  });
+
+  await check('Extension reload disposes old overlays and native cues before reinjection', async () => {
+    const targetTab = await tabIdFor(page);
+    const oldHost = await host().elementHandle();
+    await page.locator('#primary').evaluate(video => video.requestFullscreen());
+    await eventually(() => page.locator('#primary').evaluate(video => [...video.textTracks].some(track => track.label === 'CaptionDrop' && track.mode === 'showing')), value => value, 'The old native track did not activate');
+    const previousWorker = worker;
+    await previousWorker.evaluate(() => chrome.runtime.reload()).catch(() => {});
+    await eventually(() => oldHost.evaluate(element => element.isConnected), value => !value, 'The old content script did not remove its overlay after reload', 4000);
+    assert.equal(await page.locator('#primary').evaluate(video => [...video.textTracks].filter(track => track.label === 'CaptionDrop').every(track => { if (track.mode !== 'disabled') return false; track.mode = 'hidden'; const count = track.cues?.length || 0; track.mode = 'disabled'; return count === 0; })), true, 'Old native cues survived extension reload');
+    await page.evaluate(() => document.exitFullscreen());
+    if (!popup || popup.isClosed()) popup = await context.newPage();
+    await popup.goto(`chrome-extension://${extensionId}/popup.html?tabId=${targetTab}`);
+    worker = await eventually(() => context.serviceWorkers().find(candidate => candidate !== previousWorker && candidate.url().startsWith(`chrome-extension://${extensionId}/`)), value => Boolean(value), 'The replacement service worker did not start');
+    await scan(); await scan();
+    await eventually(() => host().count(), count => count === 1, 'Reinjection did not create exactly one caption overlay');
+    await seek(2);
+    await expectCaption('你好 · مرحبًا · Hello 👋\nSecond line & readable text.');
+    await new Promise(resolve => setTimeout(resolve, 1400));
+    assert.equal(await oldHost.evaluate(element => element.isConnected), false, 'An old observer resurrected the discarded overlay');
+    assert.equal(await host().count(), 1);
+    await oldHost.dispose();
   });
 
   await openPopup();
@@ -503,7 +760,7 @@ try {
     await seek(2);
     await expectCaption('你好 · مرحبًا · Hello 👋\nSecond line & readable text.');
     const style = await caption().evaluate(element => ({ size: getComputedStyle(element).fontSize, color: getComputedStyle(element).color, background: getComputedStyle(element).backgroundColor }));
-    assert.deepEqual(style, { size: '36px', color: 'rgb(255, 224, 136)', background: 'rgba(0, 0, 0, 0)' });
+    assert.deepEqual(style, { size: '36px', color: 'rgb(255, 255, 255)', background: 'rgba(0, 0, 0, 0)' });
     assert.equal(await host().locator('#background-color').inputValue(), 'transparent');
     await page.screenshot({ path: path.join(artifacts, 'restored-after-restart.png'), fullPage: true });
   });
@@ -517,8 +774,6 @@ try {
     await page.locator('#primary').evaluate(video => video.readyState >= 2 ? undefined : new Promise(resolve => video.addEventListener('loadeddata', resolve, { once: true })));
     await new Promise(resolve => setTimeout(resolve, 500));
     assert.equal(await host().count(), 0, 'Forgotten subtitles were restored');
-    const entries = await worker.evaluate(() => chrome.storage.local.get(null));
-    assert.equal(Object.values(entries).filter(value => value?.identity?.includes('video=one') && typeof value.text === 'string').length, 0, 'The video still has a saved subtitle record');
   });
 
   await check('Chrome parses and indexes a 10,000-cue subtitle file', async () => {

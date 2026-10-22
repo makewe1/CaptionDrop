@@ -2,7 +2,7 @@
 
 ## Status and purpose
 
-The user authorized implementation of this specification. Version 0.1.2 implements
+The user authorized implementation of this specification. Version 0.1.3 implements
 local-file subtitles with a simple, elegant interface. This file records the
 required behavior, project boundary, and practical defaults chosen for this build.
 Verification details and installation instructions are in `README.md`.
@@ -61,6 +61,10 @@ videos; detection must not pause, restart, or seek the video.
 - Use a selectable list of detected videos in the toolbar popup.
 - Clicking a video entry opens the system file browser directly.
 - Read and validate the selected SRT locally; attach it only to the chosen video.
+- Keep file selection in an extension-owned interface. The player panel opens
+  that interface for replacement; no file input is exposed to the webpage.
+- Ignore synthetic webpage events on controls that persist or delete settings.
+- Complete a new-player load before disabling the previous player.
 - Cancelling selection leaves the existing captions unchanged.
 - Invalid or unreadable replacements show a useful message and retain existing
   captions. A missing target permits selecting a video again.
@@ -160,15 +164,20 @@ Build decisions:
 - Memory is per individual video, rather than reusing one file across a domain.
 - YouTube uses the video ID; Bilibili separates video IDs, multipart selections,
   and episode IDs. Generic sites use normalized page/source identity and player
-  ordinal, with the top page included for embedded players.
+  slot that stays stable while the element is connected, with the top page
+  included for embedded players. Only the association hash is saved.
 - Persist subtitle contents, text size, colors, relative position, and visibility.
   Do not save or restore video playback position.
 - Keep at most 50 saved videos and approximately 8 MiB of caption data. Remove
   the oldest saved entries when the memory budget is exceeded.
-- Normal-window memory stays in browser-local extension storage. Incognito memory
-  uses separate session storage and is cleared after the last private window closes.
+- Preserve existing saved records when a replacement write fails; eviction must
+  be recoverable on storage failure.
+- Normal-window memory stays in browser-local extension storage, restricted to
+  trusted extension contexts. Incognito captions stay only in page memory and
+  are discarded on page reload or close; they cannot restore on another visit.
 - Automatic loading uses optional per-site access and persisted script registration.
-  Cross-origin embedded players may require their own site-access grant.
+  Cross-origin embedded players may require their own site-access grant, chosen
+  explicitly one origin at a time.
 
 Acceptance: test restoration after reload and browser restart, delayed video
 loading, separate video identities, SPA navigation, cache limits, forgetting,
@@ -188,15 +197,19 @@ permission revocation, and private-session separation.
 - Handle missing/replaced players, invalid files, inaccessible frames, and memory
   failures without interrupting the website.
 - Prevent duplicate overlays, buttons, native fallback cues, and stale attachments.
+  Dispose old content-script instances when their extension context is invalidated.
 - Clean up listeners, timers, observers, and native fallback cues on detachment.
 - Preserve the selected-video reservation across background service-worker restarts.
+- Release reservations for removed frames and retry restoration for replacements.
+- Keep the overlay aligned when a player moves without changing size.
 - Use useful status messages and manual recovery paths.
 
 ### NFR-03 — Light
 
 - Use plain JavaScript, HTML, and CSS with no runtime framework or external service.
 - Run no continuous all-website scanner before activation or site permission.
-- Limit automatic restoration to explicitly enabled sites.
+- Limit automatic restoration to explicitly enabled sites. Do not register
+  browser-wide navigation listeners; coordinate navigation from activated pages.
 - Avoid full-page rescans for unrelated page mutations and bound saved-caption data.
 - Package only the extension runtime files and icons; exclude tests and tooling.
 - Measure package size and representative parser performance. No universal CPU,
