@@ -157,10 +157,11 @@
     maxEndTree.fill(-Infinity);
     for (let i = 0; i < cues.length; i += 1) maxEndTree[treeSize + i] = cues[i].end;
     for (let i = treeSize - 1; i > 0; i -= 1) maxEndTree[i] = Math.max(maxEndTree[i * 2], maxEndTree[i * 2 + 1]);
-    return { cues, treeSize, maxEndTree };
+    const boundaries = [...new Set(cues.flatMap(cue => [cue.start, cue.end]))].sort((a, b) => a - b);
+    return { cues, treeSize, maxEndTree, boundaries };
   }
 
-  function activeCues(index, time) {
+  function activeCues(index, time, limit = Infinity) {
     if (!index || !index.cues.length || !Number.isFinite(time)) return [];
     const { cues, treeSize, maxEndTree } = index;
     // Find the first cue that has not started. The interval tree then skips
@@ -175,7 +176,7 @@
     const end = low;
     const result = [];
     function visit(node, left, right) {
-      if (left >= end || maxEndTree[node] <= time) return;
+      if (result.length >= limit || left >= end || maxEndTree[node] <= time) return;
       if (right - left === 1) {
         result.push(cues[left]);
         return;
@@ -186,6 +187,26 @@
     }
     if (end) visit(1, 0, treeSize);
     return result;
+  }
+
+  function cueWindow(index, time) {
+    const boundaries = index.boundaries;
+    let low = 0;
+    let high = boundaries.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (boundaries[middle] <= time) low = middle + 1;
+      else high = middle;
+    }
+    // Keep pathological overlaps and single enormous cues from monopolizing
+    // page layout. The full parsed file remains available in private memory.
+    let text = '';
+    for (const cue of activeCues(index, time, 32)) {
+      if (text) text += '\n';
+      text += cue.text.slice(0, 8192 - text.length);
+      if (text.length >= 8192) break;
+    }
+    return { text, from: low ? boundaries[low - 1] : -Infinity, until: boundaries[low] ?? Infinity };
   }
 
   function bounded(value, fallback, min, max) {
@@ -222,10 +243,18 @@
     'auth', 'auth_key', 'key-pair-id', 'policy', 'hdnea', 'hdntl', 'range', 'rn', 'rbuf',
   ]);
 
+  // Playback positions such as 90, 90.5s, 1h2m3s or 01:02:03. Other values of
+  // t/time/start/end can name the content itself, such as ?time=episode-2.
+  function timestampValue(value) {
+    return /^\d+(?:\.\d+)?s?$/i.test(value) || /^(?:\d+h)?(?:\d+m)?(?:\d+(?:\.\d+)?s)?$/i.test(value)
+      || /^\d+(?::\d{2}){1,2}(?:\.\d+)?$/.test(value);
+  }
+
   function cleanParameters(parameters, media) {
     for (const name of [...parameters.keys()]) {
       const lower = name.toLowerCase();
-      if (lower.startsWith('utm_') || TRACKING_PARAMETERS.has(lower) || TIME_PARAMETERS.has(lower)
+      if (lower.startsWith('utm_') || TRACKING_PARAMETERS.has(lower)
+        || (TIME_PARAMETERS.has(lower) && parameters.getAll(name).every(timestampValue))
         || (media && (VOLATILE_MEDIA_PARAMETERS.has(lower) || lower.startsWith('x-amz-') || lower.startsWith('x-goog-')))) {
         parameters.delete(name);
       }
@@ -241,10 +270,12 @@
     url.username = '';
     url.password = '';
     cleanParameters(url.searchParams, media);
-    // Hash-based app routes can identify different videos. Ordinary anchors and
-    // playback fragments cannot, and all media-source fragments are discarded.
+    // Hash-based app routes and episode fragments (#ep2) can identify different
+    // videos. Ordinary anchors and playback fragments cannot, and all
+    // media-source fragments are discarded.
     const fragment = url.hash.slice(1);
-    if (!media && (/^!?\//.test(fragment) || /^(?:video|video_id|v|episode|id)=/i.test(fragment))) {
+    if (!media && (/^!?\//.test(fragment) || /^(?:video|video_id|v|episode|id)=/i.test(fragment)
+      || /^(?:ep|episode|e|part|chapter|ch)[-_]?\d+$/i.test(fragment))) {
       const separator = fragment.indexOf('?');
       if (separator >= 0) {
         const query = new URLSearchParams(fragment.slice(separator + 1));
@@ -281,9 +312,11 @@
     return normalized;
   }
 
-  function videoKey({ pageUrl, topUrl, src, ordinal = 0 } = {}) {
+  // Embedded frames receive an opaque token for their top-level page instead of
+  // its URL. The worker expands token identities back to URL identities.
+  function videoKey({ pageUrl, topUrl, topToken, src, ordinal = 0 } = {}) {
     const page = pageIdentity(pageUrl);
-    const top = topUrl ? pageIdentity(topUrl) : page;
+    const top = topToken || (topUrl ? pageIdentity(topUrl) : page);
     const providerKnown = page.startsWith('youtube:') || page.startsWith('bilibili:');
     const media = providerKnown ? '' : normalizedUrl(src, pageUrl, true);
     // Provider IDs already identify their logical video. Other players appearing
@@ -304,8 +337,13 @@
     throw new Error('Secure browser storage is unavailable. Reload the extension and try again.');
   }
 
+  async function topToken(topUrl) {
+    const identity = pageIdentity(topUrl);
+    return identity ? `top:${(await hashKey(identity)).slice(0, 32)}` : '';
+  }
+
   return Object.freeze({
     MAX_FILE_BYTES, MAX_TEXT_LENGTH, MAX_CUES, DEFAULT_STYLE, decodeSubtitle, parseSrt,
-    buildCueIndex, activeCues, normalizeStyle, videoKey, hashKey,
+    buildCueIndex, activeCues, cueWindow, normalizeStyle, videoKey, hashKey, topToken,
   });
 });

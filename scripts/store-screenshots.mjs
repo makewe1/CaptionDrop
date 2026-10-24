@@ -45,9 +45,9 @@ Make yourself comfortable.
 `;
 
 async function eventually(read, predicate, message, timeout = 7000) {
-  const until = Date.now() + timeout;
+  const until = performance.now() + timeout;
   let last;
-  while (Date.now() < until) {
+  while (performance.now() < until) {
     try { last = await read(); if (predicate(last)) return last; }
     catch (error) { last = error.message; }
     await new Promise(resolve => setTimeout(resolve, 60));
@@ -178,7 +178,7 @@ try {
   const choosing = popup.waitForEvent('filechooser');
   await popup.locator('.video-card').click();
   await (await choosing).setFiles({ name: 'sample-captions.srt', mimeType: 'application/x-subrip', buffer: Buffer.from(subtitle) });
-  const host = closedShadow(page, 'captiondrop-player[data-captiondrop-overlay]');
+  const host = closedShadow(page, 'div[data-captiondrop-overlay]');
   await eventually(() => host.count(), count => count === 1, 'The real extension did not attach captions');
   await page.bringToFront();
   await presentVideoFrame(page, 4);

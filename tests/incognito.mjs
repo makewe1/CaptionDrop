@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import { prepareProfile } from './chrome-support.mjs';
 
 // Exercise Chrome's actual split Incognito context, never a user's profile.
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -23,8 +24,9 @@ let passed = 0;
 
 async function eventually(read, predicate, label, timeout = 10000) {
   let last;
-  const deadline = Date.now() + timeout;
-  while (Date.now() < deadline) {
+  // The monotonic clock keeps waits correct when the system clock is adjusted.
+  const deadline = performance.now() + timeout;
+  while (performance.now() < deadline) {
     try { last = await read(); if (predicate(last)) return last; }
     catch (error) { last = error.message; }
     await delay(100);
@@ -125,6 +127,7 @@ try {
   });
   await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
   const fixture = `http://127.0.0.1:${server.address().port}/private-page-do-not-save`;
+  await prepareProfile(profile);
   context = await chromium.launchPersistentContext(profile, {
     executablePath: process.env.CAPTIONDROP_BROWSER_PATH || '/usr/bin/google-chrome', headless: true,
     ignoreDefaultArgs: ['--disable-extensions'], args: ['--no-sandbox', '--no-first-run', '--no-default-browser-check', '--enable-unsafe-extension-debugging', '--disable-features=DisableLoadExtensionCommandLineSwitch', `--load-extension=${extensionRoot}`]
@@ -159,6 +162,26 @@ try {
   assert.equal(loaded.ok, true); assert.equal(loaded.saved, false);
   await eventually(() => activeOn(privatePage.worker, privatePage.tabId), active => active?.text === 'PRIVATE-caption-text-do-not-retain', 'Private captions were not rendered');
   pass('Real split Incognito worker renders private captions in page memory');
+  const privateAuto = await evalTarget(privatePage.worker.targetId, `(async()=>{
+    const before=await chrome.storage.local.get('cd:auto-sites');
+    let error;
+    try { await handle({type:'CD_ENABLE_AUTO',tabId:${privatePage.tabId},origins:['http://127.0.0.1/*']},{id:chrome.runtime.id,url:chrome.runtime.getURL('popup.html')}); }
+    catch (failure) { error=failure.message; }
+    return {error,unchanged:JSON.stringify(before)===JSON.stringify(await chrome.storage.local.get('cd:auto-sites'))};
+  })()`);
+  assert.match(privateAuto.error, /private windows/);
+  assert.equal(privateAuto.unchanged, true);
+  const picker = await evalTarget(privatePage.worker.targetId, `(async()=>{
+    const videoTab=await chrome.tabs.get(${privatePage.tabId});
+    const tab=await chrome.tabs.create({windowId:videoTab.windowId,url:chrome.runtime.getURL('popup.html')+'?tabId=${privatePage.tabId}'});
+    return {id:tab.id};
+  })()`);
+  const pickerUrl = `chrome-extension://${extensionId}/popup.html?tabId=${privatePage.tabId}`;
+  const pickerTarget = await eventually(async () => (await browserSession.send('Target.getTargets')).targetInfos.find(target => target.url === pickerUrl
+    && target.browserContextId === privatePage.worker.browserContextId), Boolean, 'Private picker did not open');
+  await eventually(() => evalTarget(pickerTarget.targetId, `document.querySelector('#auto-load')?.disabled && document.querySelector('#memory-note')?.textContent.includes('Private captions')`), Boolean, 'Private automatic-loading button was enabled');
+  await evalTarget(privatePage.worker.targetId, `chrome.tabs.remove(${picker.id}).then(()=>true)`);
+  pass('Private automatic loading is disabled in the popup and rejected without persistent preferences');
   await delay(500); await assertNoPrivateStorage('after private load');
   pass('Neither worker stores private subtitle text, filename, or video identity in local/session storage');
 

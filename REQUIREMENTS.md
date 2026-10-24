@@ -2,7 +2,7 @@
 
 ## Status and purpose
 
-The user authorized implementation of this specification. Version 0.1.3 implements
+The user authorized implementation of this specification. Version 0.1.4 implements
 local-file subtitles with a simple, elegant interface. This file records the
 required behavior, project boundary, and practical defaults chosen for this build.
 Verification details and installation instructions are in `README.md`.
@@ -12,7 +12,8 @@ an account, backend, subtitle upload, or external runtime dependencies.
 
 ## Version 1 boundary
 
-- Desktop Google Chrome 120 or newer; Manifest V3.
+- Desktop Google Chrome 140 or newer; Manifest V3. Earlier Chrome versions cannot
+  enforce the required trusted-context-only access to local extension storage.
 - One selected video and one subtitle file at a time in each browser tab.
 - Standard HTML5 videos across websites, including dynamically loaded videos,
   accessible embedded frames, and open shadow-root players.
@@ -78,6 +79,8 @@ malformed files, oversized files, replacement, and correct video selection.
 - Use the video's current playback time to select the active subtitle cues.
 - Remain synchronized through playing, pausing, seeking, and speed changes.
 - Display overlapping cues together and no text during gaps between cues.
+- Bound pathological overlay output to 32 simultaneous cues and 8,192 characters;
+  retain the complete subtitle file and cache text between cue boundaries.
 - Render subtitle contents as plain text, including multiline and right-to-left
   text; embedded file markup must not execute as HTML.
 - Do not add manual time shifting, offset, delay, or individual cue editing.
@@ -104,7 +107,10 @@ settings remembered per video. Previously saved custom backgrounds fall back to 
 - Keep the subtitle block inside the visible video bounds when resized.
 - In player-container fullscreen, retain the overlay, dragging, and settings.
 - In native fullscreen directly on a `<video>`, render captions using a native
-  subtitle track. Exit that mode to drag captions or access CaptionDrop settings.
+  subtitle track containing only the current display text. Clear it on exit.
+  Exit that mode to drag captions or access CaptionDrop settings.
+- Use built-in hosts for closed UI roots so page custom-element definitions cannot
+  access them. Align the overlay under root zoom/transforms and in modal dialogs.
 - Do not replace or remove the website's existing subtitle tracks.
 
 Acceptance: test normal view, resizing, player-container fullscreen, native video
@@ -165,17 +171,24 @@ Build decisions:
 - YouTube uses the video ID; Bilibili separates video IDs, multipart selections,
   and episode IDs. Generic sites use normalized page/source identity and player
   slot that stays stable while the element is connected, with the top page
-  included for embedded players. Only the association hash is saved.
+  included for embedded players. Save the association hash and an opaque hash of
+  the browser-verified top-level and player-frame origins for eviction ownership.
 - Persist subtitle contents, text size, colors, relative position, and visibility.
   Do not save or restore video playback position.
 - Keep at most 50 saved videos and approximately 8 MiB of caption data. Remove
-  the oldest saved entries when the memory budget is exceeded.
+  only the oldest entries with the same top-level and player-frame origins when
+  space is needed. Saves, settings updates, quota retries, and index repair must
+  preserve other sites' records and legacy records without ownership. If the
+  saving site's entries cannot free enough space, reject the write atomically
+  and keep captions available for the current visit. Full resaves can establish
+  ownership for their exact legacy association.
 - Preserve existing saved records when a replacement write fails; eviction must
   be recoverable on storage failure.
 - Normal-window memory stays in browser-local extension storage, restricted to
   trusted extension contexts. Incognito captions stay only in page memory and
   are discarded on page reload or close; they cannot restore on another visit.
 - Automatic loading uses optional per-site access and persisted script registration.
+  It cannot be enabled from Incognito windows.
   Cross-origin embedded players may require their own site-access grant, chosen
   explicitly one origin at a time.
 

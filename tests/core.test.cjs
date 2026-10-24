@@ -6,8 +6,25 @@ const fs = require('node:fs');
 const { spawnSync } = require('node:child_process');
 const {
   MAX_FILE_BYTES, MAX_TEXT_LENGTH, MAX_CUES, DEFAULT_STYLE, decodeSubtitle, parseSrt,
-  buildCueIndex, activeCues, normalizeStyle, videoKey, hashKey,
+  buildCueIndex, activeCues, cueWindow, normalizeStyle, videoKey, hashKey, topToken,
 } = require('../core.js');
+
+test('render windows preserve overlaps, gaps, exact boundaries and backward seeks', () => {
+  const index = buildCueIndex([{ start: 1, end: 3, text: 'one' }, { start: 2, end: 4, text: 'two' }, { start: 8, end: 9, text: 'three' }]);
+  for (const time of [0, 1, 2, 3, 4, 8, 9, 2.5, 1.5]) {
+    const window = cueWindow(index, time);
+    assert.equal(window.text, activeCues(index, time).map(cue => cue.text).join('\n'));
+    assert.ok(window.from <= time && window.until > time);
+  }
+});
+
+test('rendering bounds pathological overlap and enormous individual cues', () => {
+  const overlapping = buildCueIndex(Array.from({ length: MAX_CUES }, (_, i) => ({ start: 0, end: 100, text: String(i) })));
+  assert.equal(cueWindow(overlapping, 1).text.split('\n').length, 32);
+  const enormous = buildCueIndex([{ start: 0, end: 100, text: 'x'.repeat(MAX_TEXT_LENGTH) }]);
+  assert.equal(cueWindow(enormous, 1).text.length, 8192);
+  assert.equal(cueWindow(enormous, 100).text, '');
+});
 
 test('SRT accepts mixed line endings, a BOM, missing IDs, multiline text, and both millisecond separators', () => {
   const cues = parseSrt('\ufeff2\r\n00:00:05.125 --> 00:00:07.500\r\nSecond line\r\nAnother line\r\n\r\n00:00:01,000 --> 00:00:03,250\nFirst line');
@@ -249,4 +266,33 @@ test('core loads directly as a browser content script without CommonJS globals',
   vm.runInContext(fs.readFileSync(require.resolve('../core.js'), 'utf8'), context);
   assert.equal(typeof context.CaptionDropCore.parseSrt, 'function');
   assert.equal(context.CaptionDropCore.normalizeStyle().size, 28);
+});
+
+test('time parameters are ignored only when they hold playback positions', () => {
+  const key = query => videoKey({ pageUrl: `https://stream.example/watch${query}`, src: 'blob:https://stream.example/media' });
+  for (const [first, second] of [['?t=90', '?t=91'], ['?t=1h2m3s', '?t=4m'], ['?start=01:02:03', '?start=00:10'], ['?time=12.5s', ''], ['?end=', '']]) {
+    assert.equal(key(first), key(second), `${first} and ${second} should share captions`);
+  }
+  for (const [first, second] of [['?time=episode-1', '?time=episode-2'], ['?start=s1', '?start=s2'], ['?t=ep1', '?t=ep2'], ['?end=2024-01', '?end=2024-02']]) {
+    assert.notEqual(key(first), key(second), `${first} and ${second} should keep separate captions`);
+  }
+});
+
+test('episode fragments keep separate memories while ordinary anchors and playback fragments do not', () => {
+  const key = fragment => videoKey({ pageUrl: `https://stream.example/watch${fragment}`, src: 'blob:https://stream.example/media' });
+  for (const [first, second] of [['#ep1', '#ep2'], ['#episode-3', '#episode-4'], ['#part_1', '#part_2'], ['#ch7', '#ch8']]) {
+    assert.notEqual(key(first), key(second));
+  }
+  for (const fragment of ['#comments', '#top', '#t=30', '#']) assert.equal(key(fragment), key(''));
+});
+
+test('embedded top-page tokens are opaque, normalized and distinct per page', async () => {
+  const token = await topToken('https://example.com/article?id=1&session=abc123');
+  assert.match(token, /^top:[0-9a-f]{32}$/);
+  assert.equal(token, await topToken('https://example.com/article?session=abc123&id=1&utm_source=feed#comments'));
+  assert.notEqual(token, await topToken('https://example.com/article?id=2&session=abc123'));
+  assert.equal(await topToken('chrome://extensions'), '');
+  const frame = { pageUrl: 'https://www.youtube.com/embed/first', src: 'blob:one' };
+  assert.notEqual(videoKey({ ...frame, topToken: token }), videoKey({ ...frame, topToken: await topToken('https://other.example/') }));
+  assert.equal(videoKey({ ...frame, topToken: token }).includes('abc123'), false);
 });

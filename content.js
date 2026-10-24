@@ -12,21 +12,29 @@
   // Isolated worlds are replaced on extension reload. Retire the previous
   // instance before creating another overlay in the same document.
   document.dispatchEvent(new Event(takeoverEvent));
-  document.querySelectorAll('captiondrop-player[data-captiondrop-overlay],captiondrop-control[data-captiondrop="control"],style[data-captiondrop="native-style"]').forEach(element => element.remove());
+  document.querySelectorAll('div[data-captiondrop-overlay],span[data-captiondrop="control"],style[data-captiondrop="native-style"]').forEach(element => element.remove());
 
   const videos = new Map();
-  const watchedRoots = new Map();
+  const registeredVideos = new WeakMap();
+  const watchedRoots = new Set();
+  const treeObserver = new MutationObserver(observeMutations);
   const nativeTracks = new WeakMap();
   const attempted = new Set();
   const suppressed = new Set();
   let sequence = 0;
   let active = null;
-  let topUrl = window === window.top ? location.href : '';
+  let topToken = '';
   let previousUrl = location.href;
   let scanTimer = 0;
   let restoreVersion = 0;
   let restoreRetryTimer = 0;
   let restoreRetryCount = 0;
+  let restoreRunning = false;
+  let restoreTimer = 0;
+  let lastRestoreAt = -Infinity;
+  let memoryEmpty = false;
+  let navigationNotifyTimer = 0;
+  let lastContextCheck = -Infinity;
   let context = { incognito: false, autoEnabled: false };
   let contextReady = false;
   let contextPromise = null;
@@ -35,9 +43,17 @@
   const pageAbort = new AbortController();
   const svgIcon = '<svg viewBox="0 0 24 24" width="23" height="23" aria-hidden="true"><path d="M9.75 3a9 9 0 0 1 0 18a4.5 4.5 0 0 1 0-9a4.5 4.5 0 0 0 0-9Z" fill="currentColor"/></svg>';
 
-  function alive() {
+  function alive(force = false) {
     if (disposed) return false;
-    try { if (chrome.runtime?.id === extensionId) return true; } catch {}
+    try {
+      if (chrome.runtime?.id === extensionId) {
+        if (force || performance.now() - lastContextCheck >= 250) {
+          chrome.runtime.getManifest();
+          lastContextCheck = performance.now();
+        }
+        return true;
+      }
+    } catch {}
     dispose();
     return false;
   }
@@ -48,7 +64,7 @@
       const result = await chrome.runtime.sendMessage(message);
       return result || { ok: false, error: 'CaptionDrop could not reach its background service. Try reopening the extension.' };
     } catch (error) {
-      alive();
+      alive(true);
       return { ok: false, error: 'CaptionDrop was reloaded. Reopen the extension to continue.' };
     }
   }
@@ -60,16 +76,17 @@
         if (!alive() || !result.ok) return;
         context = result;
         contextReady = true;
-        if (result.topUrl) topUrl = result.topUrl;
+        if (result.topToken) topToken = result.topToken;
       }).finally(() => { contextPromise = null; });
     }
     await contextPromise;
   }
 
   function keyFor(info) {
+    // Embedded frames receive an opaque token for their top-level page, never its URL.
     return Core.videoKey({
       pageUrl: location.href,
-      topUrl: topUrl || location.href,
+      ...(window === window.top ? { topUrl: location.href } : { topToken }),
       src: sourceFor(info.video),
       ordinal: info.slot
     });
@@ -114,6 +131,7 @@
       const rect = info.video.getBoundingClientRect();
       return {
         id: info.id,
+        identity: keyFor(info),
         label: labelFor(info.video, ordinal),
         width: Math.round(rect.width || info.video.videoWidth || 0),
         height: Math.round(rect.height || info.video.videoHeight || 0),
@@ -148,12 +166,13 @@
   }
 
   function registerVideo(video) {
-    if (!alive() || [...videos.values()].some(info => info.video === video)) return;
+    if (!alive() || registeredVideos.has(video)) return;
     const occupied = new Set([...videos.values()].filter(info => info.video.isConnected).map(info => info.slot));
     let slot = 0;
     while (occupied.has(slot)) slot++;
     const info = { id: `cd-video-${++sequence}`, slot, video, abort: new AbortController(), attemptedToken: null };
     videos.set(info.id, info);
+    registeredVideos.set(video, info);
     // Keep generic player slots stable while their DOM elements survive. A
     // replacement element can reuse the disconnected player's vacated slot.
     if (active?.autoRestored && active.providerKnown && isMainVideo(info) && !isMainVideo(active.info)) {
@@ -182,44 +201,39 @@
 
   function watch(root) {
     if (watchedRoots.has(root)) return;
-    const observer = new MutationObserver(mutations => {
-      if (!alive()) return;
-      let dirty = false;
-      let removedElements = false;
-      for (const mutation of mutations) {
-        if (mutation.type === 'attributes') {
-          if (['video', 'source'].includes(mutation.target.localName)) dirty = true;
-          continue;
-        }
-        for (const added of mutation.addedNodes) {
-          if (added.nodeType !== 1 || added.hasAttribute('data-captiondrop')) continue;
-          const before = videos.size;
-          const rootCount = watchedRoots.size;
-          discover(added);
-          if (before !== videos.size || rootCount !== watchedRoots.size) dirty = true;
-          if (active && !active.integrated) {
-            const selector = '.ytp-right-controls,.bpx-player-control-bottom-right,.bilibili-player-video-control-bottom-right';
-            if (added.matches(selector) || added.querySelector(selector)) dirty = true;
-          }
-        }
-        if ([...mutation.removedNodes].some(node => node.nodeType === 1)) removedElements = true;
-      }
-      // Text counters, chat messages, images, and our own UI do not trigger
-      // repeated video scans or overlay layout work.
-      if (removedElements) {
-        if ([...videos.values()].some(info => !info.video.isConnected)) dirty = true;
-        if ([...watchedRoots.keys()].some(node => node.host && !node.host.isConnected)) dirty = true;
-        if (active && (!active.host.isConnected || active.integrated && !active.integrated.isConnected)) dirty = true;
-      }
-      if (dirty) scheduleIdentityCheck();
-    });
-    observer.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'controls'] });
-    watchedRoots.set(root, observer);
+    watchedRoots.add(root);
+    treeObserver.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'controls'] });
     discover(root);
+  }
+
+  function observeMutations(mutations) {
+    if (!alive()) return;
+    let dirty = false;
+    for (const mutation of mutations) {
+      if (mutation.type === 'attributes') {
+        if (['video', 'source'].includes(mutation.target.localName)) dirty = true;
+        continue;
+      }
+      for (const added of mutation.addedNodes) {
+        if (added.nodeType !== 1 || added.hasAttribute('data-captiondrop')) continue;
+        const before = videos.size;
+        const rootCount = watchedRoots.size;
+        discover(added);
+        if (before !== videos.size || rootCount !== watchedRoots.size) dirty = true;
+        if (active && !active.integrated) {
+          const selector = '.ytp-right-controls,.bpx-player-control-bottom-right,.bilibili-player-video-control-bottom-right';
+          if (added.matches(selector) || added.querySelector(selector)) dirty = true;
+        }
+      }
+      // Defer root/video disconnection scans to one debounced cleanup.
+      if ([...mutation.removedNodes].some(node => node.nodeType === 1)) dirty = true;
+    }
+    if (dirty) scheduleIdentityCheck();
   }
 
   function scan() {
     if (!alive()) return [];
+    memoryEmpty = false;
     discover(document);
     cleanupRemoved();
     void restore();
@@ -232,13 +246,24 @@
       if (active?.info === info) detach();
       if (info.attemptedToken) attempted.delete(info.attemptedToken);
       info.abort.abort();
+      registeredVideos.delete(info.video);
       videos.delete(id);
     }
-    for (const [root, observer] of watchedRoots) {
+    let removedRoot = false;
+    for (const root of watchedRoots) {
       if (root.host && !root.host.isConnected) {
-        observer.disconnect();
         watchedRoots.delete(root);
+        removedRoot = true;
       }
+    }
+    if (removedRoot) {
+      // A shared observer has no unobserve(). Drain pending additions first,
+      // then reconnect the surviving roots once per debounced cleanup.
+      const pending = treeObserver.takeRecords();
+      if (pending.length) observeMutations(pending);
+      treeObserver.disconnect();
+      for (const root of watchedRoots) treeObserver.observe(root,
+        { childList: true, subtree: true, attributes: true, attributeFilter: ['src', 'controls'] });
     }
   }
 
@@ -272,41 +297,81 @@
   }
 
   async function restore() {
-    if (!alive() || restoreSuppressed || active || !videos.size) return;
+    // Prerendered documents are not active yet; their restore runs on activation.
+    if (!alive() || document.prerendering || restoreSuppressed || active || !videos.size || restoreRunning || memoryEmpty) return;
     await ensureContext();
-    if (!alive() || !contextReady || context.incognito || context.memoryAvailable === false || restoreSuppressed || active) return;
+    if (!alive() || document.prerendering || !contextReady || context.incognito || context.memoryAvailable === false
+      || restoreSuppressed || active || restoreRunning || memoryEmpty) return;
+    const wait = 250 - (performance.now() - lastRestoreAt);
+    if (wait > 0) { scheduleRestore(wait); return; }
     const version = restoreVersion;
+    const candidates = [];
+    const seen = new Set();
+    let identityLength = 0;
     for (const info of restoreCandidates()) {
-      if (active || version !== restoreVersion) return;
       const identity = keyFor(info);
       const token = tokenFor(identity);
-      if (attempted.has(token) || suppressed.has(token)) continue;
-      attempted.add(token);
-      info.attemptedToken = token;
-      const result = await send({ type: 'CD_RESTORE', identity });
+      if (attempted.has(token) || suppressed.has(token) || seen.has(token)) continue;
+      if (identity.length > 16000) { suppressed.add(token); continue; }
+      if (identityLength + identity.length > Core.MAX_TEXT_LENGTH) break;
+      identityLength += identity.length;
+      seen.add(token);
+      candidates.push({ info, identity, token });
+      if (candidates.length === 256) break;
+    }
+    if (!candidates.length) return;
+    restoreRunning = true;
+    lastRestoreAt = performance.now();
+    try {
+      for (const { info, token } of candidates) {
+        if (info.attemptedToken) attempted.delete(info.attemptedToken);
+        attempted.add(token);
+        info.attemptedToken = token;
+      }
+      const result = await send({ type: 'CD_RESTORE_BATCH', identities: candidates.map(item => item.identity) });
       if (!alive() || version !== restoreVersion || active) return;
-      if (!info.video.isConnected || tokenFor(keyFor(info)) !== token) continue;
-      if (result.retry) {
-        attempted.delete(token);
+      if (result.retry || !result.ok) {
+        for (const { token } of candidates) attempted.delete(token);
         if (!restoreRetryTimer && restoreRetryCount < 3) {
           restoreRetryTimer = setTimeout(() => {
             restoreRetryTimer = 0;
             void restore();
           }, 500 * 2 ** restoreRetryCount++);
         }
-      }
-      if (result.ok && result.record) {
+      } else if (result.ok && result.record) {
+        const position = candidates.findIndex(item => item.identity === result.identity);
+        // The worker stops at its first saved match. Later candidates have not
+        // been checked, so keep them eligible if this record cannot attach.
+        for (const { token } of candidates.slice(position + 1)) attempted.delete(token);
+        const candidate = candidates[position];
+        if (!candidate || !candidate.info.video.isConnected || tokenFor(keyFor(candidate.info)) !== candidate.token) {
+          scheduleRestore(250);
+          return;
+        }
         try {
           const record = result.record;
           const cues = Core.parseSrt(record.text);
-          if (!cues.length) continue;
-          attach(info, { ...record, cues, identity, remembered: true, restored: true });
-          setStatus(active, 'Restored from this device.');
+          if (cues.length) {
+            attach(candidate.info, { ...record, cues, identity: candidate.identity, remembered: true, restored: true });
+            setStatus(active, 'Restored from this device.');
+          }
         } catch {
           // A damaged saved entry must never interrupt the website or playback.
         }
+        if (!active) scheduleRestore(250);
+      } else if (result.ok) {
+        memoryEmpty = Boolean(result.empty);
+        if (!memoryEmpty) scheduleRestore(250);
       }
+    } finally {
+      restoreRunning = false;
+      if (version !== restoreVersion) scheduleRestore(250);
     }
+  }
+
+  function scheduleRestore(delay) {
+    if (restoreTimer || !alive()) return;
+    restoreTimer = setTimeout(() => { restoreTimer = 0; void restore(); }, delay);
   }
 
   function setStatus(state, message, error = false) {
@@ -319,11 +384,15 @@
     return (typeof name === 'string' ? name : 'Subtitles.srt').slice(0, 160);
   }
 
-  async function load(info, text, fileName, remember = true) {
+  async function load(info, text, fileName, remember = true, expectedIdentity, expectedSource) {
     await ensureContext();
     if (!alive()) throw new Error('CaptionDrop was reloaded. Reopen the extension to continue.');
     remember = remember && contextReady && !context.incognito && context.memoryAvailable !== false;
     if (!info || !info.video.isConnected) throw new Error('This video is no longer available. Scan again and select a video.');
+    if ((expectedIdentity !== undefined && keyFor(info) !== expectedIdentity)
+      || (expectedSource !== undefined && sourceFor(info.video) !== expectedSource)) {
+      throw new Error('The video changed while the file picker was open. Scan again and select the video.');
+    }
     if (typeof text !== 'string' || text.length > Core.MAX_TEXT_LENGTH) {
       throw new Error('Choose an SRT file smaller than 2 MB.');
     }
@@ -346,7 +415,6 @@
     if (state === active) {
       state.remembered = Boolean(result.ok && result.saved);
       state.controls.forget.disabled = !state.remembered;
-      if (state.remembered) queueSave(state);
       setStatus(state, state.remembered ?
         'Saved on this device. Restores on this video.' :
         (result.error || 'Captions loaded. Memory is unavailable for this visit.'), !state.remembered);
@@ -391,13 +459,16 @@
 
   function attach(info, options) {
     detach();
-    const host = document.createElement('captiondrop-player');
+    const host = document.createElement('div');
+    host.setAttribute('popover', 'manual');
     host.setAttribute('data-captiondrop', 'player');
     host.setAttribute('data-captiondrop-overlay', '');
     host.style.cssText = 'all:initial!important;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif!important;font-size:13px!important;line-height:1.4!important;display:block!important;position:fixed!important;z-index:2147483647!important;pointer-events:none!important;margin:0!important;padding:0!important;border:0!important;';
+    host.style.setProperty('inset', 'auto', 'important');
     const root = host.attachShadow({ mode: 'closed' });
     const styleElement = make('style');
     styleElement.textContent = STYLES;
+    styleElement.textContent += ':host::backdrop{background:transparent!important;pointer-events:none!important}';
     root.append(styleElement);
     const surface = make('div', 'surface');
     const caption = make('div', 'caption');
@@ -705,11 +776,17 @@
     const directVideoFullscreen = full === state.info.video;
     updateNativeFullscreen(state);
     if (directVideoFullscreen) {
+      if (state.host.matches(':popover-open')) state.host.hidePopover();
       state.host.style.setProperty('visibility', 'hidden', 'important');
       return;
     }
-    const parent = full && composedContains(full, state.info.video) ? (full.shadowRoot || full) : document.documentElement;
+    let modal = state.info.video;
+    while (modal && !modal.matches?.('dialog:modal')) modal = modal.parentElement || modal.getRootNode()?.host;
+    const parent = full && composedContains(full, state.info.video) ? (full.shadowRoot || full) : modal || document.documentElement;
     if (state.host.parentNode !== parent) parent.append(state.host);
+    const parentZoom = (parent instanceof ShadowRoot ? parent.host : parent).currentCSSZoom || 1;
+    state.host.style.setProperty('zoom', String(1 / parentZoom), 'important');
+    if (!state.host.matches(':popover-open')) state.host.showPopover();
     state.host.style.removeProperty('visibility');
   }
 
@@ -722,9 +799,7 @@
     const needed = fullscreenTarget() === state.info.video && state.enabled && !state.adSuppressed;
     if (!needed) {
       if (state.nativeActive) {
-        state.nativeActive = false;
-        if (state.nativeInfo) state.nativeInfo.track.mode = 'disabled';
-        removeNativeStyle(state);
+        releaseNative(state);
         render(state);
         startClock(state);
       }
@@ -744,14 +819,7 @@
         native.track.mode = 'hidden';
         for (const cue of [...(native.track.cues || [])]) native.track.removeCue(cue);
         native.owner = state;
-        for (const cue of state.cues) {
-          const item = new VTTCue(cue.start, cue.end, `<c.captiondrop>${escapeVttText(cue.text)}</c>`);
-          item.snapToLines = false;
-          item.align = 'center';
-          item.positionAlign = 'center';
-          item.lineAlign = 'center';
-          native.track.addCue(item);
-        }
+        native.window = null;
       }
       native.previousAttribute = video.getAttribute('data-captiondrop-native');
       video.setAttribute('data-captiondrop-native', state.info.id);
@@ -761,15 +829,34 @@
       const styleParent = root instanceof ShadowRoot ? root : (document.head || document.documentElement);
       if (native.sheet.parentNode !== styleParent) styleParent.append(native.sheet);
       state.nativeActive = true;
+      render(state);
       updateNativeAppearance(state);
       native.track.mode = 'showing';
       state.caption.hidden = true;
-      stopClock(state);
+      startClock(state);
     } catch {
       state.nativeActive = false;
       releaseNative(state);
       setStatus(state, 'This player cannot show captions in native fullscreen. Use the player’s windowed or theater view.', true);
     }
+  }
+
+  function syncNativeWindow(state) {
+    const native = state.nativeInfo;
+    if (!native || native.window === state.cueWindow) return;
+    for (const cue of [...(native.track.cues || [])]) native.track.removeCue(cue);
+    native.window = state.cueWindow;
+    const { text, from, until } = state.cueWindow;
+    if (!text) return;
+    // Publish only the currently displayed text, never the rest of the file.
+    const end = Number.isFinite(until) ? until : (state.info.video.currentTime || 0) + 86400;
+    const cue = new VTTCue(Math.max(0, from), end, `<c.captiondrop>${escapeVttText(text)}</c>`);
+    cue.snapToLines = false;
+    cue.align = 'center';
+    cue.positionAlign = 'center';
+    cue.lineAlign = 'center';
+    native.track.addCue(cue);
+    updateNativeAppearance(state);
   }
 
   function updateNativeAppearance(state) {
@@ -825,7 +912,7 @@
       state.integratedRoot = null;
     }
     if (controls && !state.integrated) {
-      const control = document.createElement('captiondrop-control');
+      const control = document.createElement('span');
       control.setAttribute('data-captiondrop', 'control');
       control.style.cssText = 'display:inline-flex!important;align-items:center!important;justify-content:center!important;width:40px!important;height:100%!important;min-height:24px!important;vertical-align:top!important;pointer-events:auto!important;flex:none!important;';
       const root = control.attachShadow({ mode: 'closed' });
@@ -858,6 +945,7 @@
 
   function layout(state) {
     if (state !== active || !alive()) return;
+    placeHost(state);
     const rect = state.info.video.getBoundingClientRect();
     const width = Math.max(0, rect.width);
     const height = Math.max(0, rect.height);
@@ -879,11 +967,13 @@
       checkIdentity();
       if (state !== active) return;
     }
-    if (!state.enabled || state.nativeActive || state.adSuppressed) { state.caption.hidden = true; return; }
-    let cues;
-    try { cues = Core.activeCues(state.index, state.info.video.currentTime || 0); }
-    catch { cues = []; }
-    const text = cues.map(cue => cue.text).join('\n');
+    if (!state.enabled || state.adSuppressed) { state.caption.hidden = true; return; }
+    const time = state.info.video.currentTime || 0;
+    if (!state.cueWindow || time < state.cueWindow.from || time >= state.cueWindow.until) {
+      state.cueWindow = Core.cueWindow(state.index, time);
+    }
+    const text = state.cueWindow.text;
+    if (state.nativeActive) { syncNativeWindow(state); state.caption.hidden = true; return; }
     if (text !== state.currentText) {
       state.currentText = text;
       // Subtitle content is never interpreted as HTML.
@@ -894,7 +984,7 @@
   }
 
   function startClock(state) {
-    if (state !== active || state.disposed || !alive() || state.nativeActive || state.adSuppressed || !state.enabled || state.info.video.paused || state.info.video.ended || document.hidden) return;
+    if (state !== active || state.disposed || !alive() || state.adSuppressed || !state.enabled || state.info.video.paused || state.info.video.ended || document.hidden) return;
     if (state.frameId !== null || state.fallbackTimer) return;
     const video = state.info.video;
     if (video.requestVideoFrameCallback) {
@@ -958,8 +1048,9 @@
     if (!message?.type?.startsWith('CD_')) return;
     if (!['CD_LIST', 'CD_LOAD', 'CD_HIGHLIGHT', 'CD_DISABLE_ALL', 'CD_CHECK_RESTORE'].includes(message.type)) return;
     const operation = async () => {
-      if (message.topUrl && message.topUrl !== topUrl) {
-        topUrl = message.topUrl;
+      if (window !== window.top && message.topToken && message.topToken !== topToken) {
+        topToken = message.topToken;
+        memoryEmpty = false;
         ++restoreVersion;
         restoreRetryCount = 0;
         clearTimeout(restoreRetryTimer); restoreRetryTimer = 0;
@@ -970,7 +1061,8 @@
       }
       switch (message.type) {
         case 'CD_LIST': return { ok: true, videos: scan(), frameUrl: location.href };
-        case 'CD_LOAD': return await load(videos.get(message.videoId), message.text, message.fileName, message.remember !== false);
+        case 'CD_LOAD': return await load(videos.get(message.videoId), message.text, message.fileName, message.remember !== false,
+          message.expectedIdentity, message.expectedSource);
         case 'CD_HIGHLIGHT': highlight(videos.get(message.videoId)); return { ok: true };
         case 'CD_DISABLE_ALL':
           ++restoreVersion;
@@ -979,6 +1071,7 @@
           detach();
           return { ok: true };
         case 'CD_CHECK_RESTORE':
+          memoryEmpty = false;
           cleanupRemoved();
           checkIdentity();
           await restore();
@@ -991,30 +1084,43 @@
   };
   chrome.runtime.onMessage.addListener(runtimeListener);
 
-  // One low-frequency URL check handles single-page navigation on activated pages.
-  const navigationTimer = setInterval(() => {
-    if (!alive() || document.hidden) return;
+  // Native history notifications handle pushState immediately; the low-frequency
+  // fallback also covers unusual navigation implementations in activated pages.
+  function checkNavigation() {
+    if (!alive() || document.prerendering) return;
     if (location.href !== previousUrl) {
+      const oldPage = Core.videoKey({ pageUrl: previousUrl });
       previousUrl = location.href;
-      if (window === window.top) topUrl = location.href;
+      if (Core.videoKey({ pageUrl: location.href }) === oldPage) return;
       ++restoreVersion;
       restoreRetryCount = 0;
       clearTimeout(restoreRetryTimer); restoreRetryTimer = 0;
       attempted.clear();
+      memoryEmpty = false;
       suppressed.clear();
       restoreSuppressed = false;
       checkIdentity();
       discover(document);
+      if (!videos.size && window !== window.top) return;
       const version = restoreVersion;
       // Only activated documents report navigation. The background derives the
       // actual tab/frame URLs instead of observing all browser navigation.
-      void send({ type: 'CD_NAVIGATED' }).then(() => {
-        if (alive() && version === restoreVersion) void restore();
-      });
+      clearTimeout(navigationNotifyTimer);
+      navigationNotifyTimer = setTimeout(() => {
+        navigationNotifyTimer = 0;
+        void send({ type: 'CD_NAVIGATED' }).then(() => {
+          if (alive() && version === restoreVersion) void restore();
+        });
+      }, 100);
     }
-  }, 1200);
+  }
+  const navigationTimer = setInterval(() => { if (alive() && !document.hidden) checkNavigation(); }, 1200);
+  globalThis.navigation?.addEventListener('currententrychange', event => {
+    if (event.isTrusted) checkNavigation();
+  }, { signal: pageAbort.signal });
 
   window.addEventListener('pagehide', event => {
+    if (!event.isTrusted) return;
     if (event.persisted) { if (active) stopClock(active); return; }
     // Flush a pending user setting while this normal page still has a valid
     // extension context; takeover/invalidation disposal never persists state.
@@ -1022,11 +1128,12 @@
     dispose();
   }, { signal: pageAbort.signal });
   window.addEventListener('pageshow', event => {
-    if (!alive()) return;
-    if (event.persisted) void send({ type: 'CD_NAVIGATED' });
+    if (!event.isTrusted || !alive()) return;
+    if (event.persisted && videos.size) void send({ type: 'CD_NAVIGATED' });
     if (active) { layout(active); render(active); startClock(active); }
   }, { signal: pageAbort.signal });
-  document.addEventListener(takeoverEvent, () => dispose(), { signal: pageAbort.signal });
+  document.addEventListener(takeoverEvent, () => alive(true), { signal: pageAbort.signal });
+  document.addEventListener('prerenderingchange', event => { if (event.isTrusted && alive()) void restore(); }, { signal: pageAbort.signal });
 
   function dispose() {
     if (disposed) return;
@@ -1037,7 +1144,9 @@
     clearInterval(navigationTimer);
     clearTimeout(scanTimer);
     clearTimeout(restoreRetryTimer);
-    for (const observer of watchedRoots.values()) observer.disconnect();
+    clearTimeout(restoreTimer);
+    clearTimeout(navigationNotifyTimer);
+    treeObserver.disconnect();
     for (const info of videos.values()) info.abort.abort();
     watchedRoots.clear(); videos.clear(); attempted.clear(); suppressed.clear();
     pageAbort.abort();
@@ -1050,8 +1159,5 @@
     get active() { return active ? { videoId: active.info.id, fileName: active.fileName, enabled: active.enabled, style: { ...active.style }, text: active.currentText } : null; }
   };
   watch(document);
-  void (async () => {
-    await ensureContext();
-    await restore();
-  })();
+  void restore();
 })();

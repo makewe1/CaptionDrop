@@ -5,6 +5,7 @@ const list = $('#videos');
 const fileInput = $('#subtitle-file');
 let tabId;
 let selected;
+let pickerTarget;
 let scanResult;
 let scanning = false;
 const parameters = new URLSearchParams(location.search);
@@ -51,6 +52,7 @@ function renderVideos(videos) {
     button.append(preview, info, arrow);
     button.addEventListener('click', () => {
       selected = video;
+      pickerTarget = { ...video };
       list.querySelectorAll('.selected').forEach(element => {
         element.classList.remove('selected'); element.removeAttribute('aria-current');
       });
@@ -72,7 +74,7 @@ async function scan() {
     scanResult = await send({ type: 'CD_SCAN', tabId });
     renderVideos(scanResult.videos);
     const auto = $('#auto-load');
-    auto.disabled = scanResult.autoEnabled || !scanResult.origin;
+    auto.disabled = scanResult.incognito || scanResult.autoEnabled || !scanResult.origin;
     auto.textContent = scanResult.autoEnabled ? 'Automatic loading enabled' : 'Enable automatic loading';
     const embedded = $('#embedded-origin');
     const previousOrigin = embedded.value;
@@ -110,7 +112,7 @@ async function scan() {
 }
 fileInput.addEventListener('change', async () => {
   const file = fileInput.files[0];
-  const target = selected;
+  const target = pickerTarget;
   if (!file || !target) return;
   try {
     if (!/\.srt$/i.test(file.name)) throw new Error('Choose a SubRip (.srt) subtitle file.');
@@ -119,6 +121,7 @@ fileInput.addEventListener('change', async () => {
     const text = Core.decodeSubtitle(await file.arrayBuffer());
     Core.parseSrt(text);
     const result = await send({ type: 'CD_LOAD_VIDEO', tabId, frameId: target.frameId,
+      documentId: target.documentId, identity: target.identity, src: target.src,
       videoId: target.id, text, fileName: file.name });
     status(result.warning || `${file.name} loaded. Use the CaptionDrop button on your video for settings.`, Boolean(result.warning));
     const button = [...list.children].find(item => item.dataset.videoId === target.id && Number(item.dataset.frameId) === target.frameId);
@@ -133,7 +136,8 @@ function enableOrigins(origins) {
   // Request from the button handler itself, before any asynchronous work.
   chrome.permissions.request({ origins }).then(async granted => {
     if (!granted) { status('Site access was not enabled. You can still load subtitles manually.'); return; }
-    await send({ type: 'CD_ENABLE_AUTO', origins });
+    if (scanResult?.incognito) { await scan(); return; }
+    await send({ type: 'CD_ENABLE_AUTO', tabId, origins });
     await scan();
     status('Site access enabled. Saved subtitles will load automatically on matching videos.');
   }).catch(error => status(error.message, true));
